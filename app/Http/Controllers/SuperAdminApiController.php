@@ -479,4 +479,92 @@ class SuperAdminApiController extends Controller
             'message' => 'Collaborateur supprimé.',
         ]);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PROFIL DU SUPERADMIN CONNECTÉ
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Renvoie le profil du SuperAdmin actuellement connecté.
+     * GET /superadmin/me
+     */
+    public function me(Request $request)
+    {
+        /** @var SuperAdmin $superAdmin */
+        $superAdmin = $request->user();
+
+        return response()->json([
+            'status' => 'success',
+            'admin'  => [
+                'id'    => $superAdmin->id,
+                'name'  => $superAdmin->name,
+                'email' => $superAdmin->email,
+                'phone' => $superAdmin->phone,
+            ],
+        ]);
+    }
+
+    /**
+     * Modifie les informations personnelles du SuperAdmin connecté.
+     * PUT /superadmin/me
+     */
+    public function updateProfile(Request $request)
+    {
+        /** @var SuperAdmin $superAdmin */
+        $superAdmin = $request->user();
+
+        $validated = $request->validate([
+            'name'  => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email', 'max:150', Rule::unique('super_admins', 'email')->ignore($superAdmin->id)],
+            'phone' => ['nullable', 'string', 'max:25', Rule::unique('super_admins', 'phone')->ignore($superAdmin->id)],
+        ]);
+
+        $superAdmin->update($validated);
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Profil mis à jour avec succès.',
+            'admin'   => [
+                'id'    => $superAdmin->id,
+                'name'  => $superAdmin->name,
+                'email' => $superAdmin->email,
+                'phone' => $superAdmin->phone,
+            ],
+        ]);
+    }
+
+    /**
+     * Change le mot de passe du SuperAdmin connecté.
+     * PUT /superadmin/me/password
+     */
+    public function updatePassword(Request $request)
+    {
+        /** @var SuperAdmin $superAdmin */
+        $superAdmin = $request->user();
+
+        $validated = $request->validate([
+            'current_password' => ['required', 'string'],
+            'new_password'      => ['required', 'string', 'min:6', 'confirmed'],
+        ], [
+            'new_password.confirmed' => 'La confirmation du nouveau mot de passe ne correspond pas.',
+        ]);
+
+        if (!Hash::check($validated['current_password'], $superAdmin->password)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Le mot de passe actuel est incorrect.',
+            ], 422);
+        }
+
+        $superAdmin->update(['password' => Hash::make($validated['new_password'])]);
+
+        // Révoque les autres sessions actives, garde uniquement celle-ci
+        $currentTokenId = $superAdmin->currentAccessToken()?->id;
+        $superAdmin->tokens()->where('id', '!=', $currentTokenId)->delete();
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Mot de passe modifié avec succès. Vos autres sessions ont été déconnectées.',
+        ]);
+    }
 }

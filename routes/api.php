@@ -108,7 +108,9 @@ use Illuminate\Support\Facades\Route;
  
         // Dashboard
         Route::get('/dashboard/stats', [SuperAdminApiController::class, 'dashboardStats']);
-
+        Route::get('/me',          [SuperAdminApiController::class, 'me']);
+        Route::put('/me',          [SuperAdminApiController::class, 'updateProfile']);
+        Route::put('/me/password', [SuperAdminApiController::class, 'updatePassword']);
         // Établissements
         Route::get   ('/establishments',              [SuperAdminApiController::class, 'listEstablishments']);
         Route::post  ('/establishments',              [SuperAdminApiController::class, 'createEstablishment']);
