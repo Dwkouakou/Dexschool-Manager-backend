@@ -118,6 +118,7 @@ use Illuminate\Support\Facades\Route;
         Route::put   ('/establishments/{id}',         [SuperAdminApiController::class, 'updateEstablishment']);
         Route::put   ('/establishments/{id}/toggle',  [SuperAdminApiController::class, 'toggleEstablishment']);
         Route::delete('/establishments/{id}',         [SuperAdminApiController::class, 'deleteEstablishment']);
+        Route::get('/establishments/{id}/children', [SuperAdminApiController::class, 'listEstablishmentChildren']);
  
         // Collaborateurs de l'équipe DexSchool
         Route::get   ('/team',              [SuperAdminApiController::class, 'listTeamMembers']);

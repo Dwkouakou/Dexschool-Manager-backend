@@ -131,215 +131,153 @@ class SuperAdminApiController extends Controller
                 ->get(['id', 'name', 'email', 'phone']);
         }
 
+        // ─── AJOUT : infos groupe scolaire (parent + enfants) ───
+        $parent = $establishment->parent_establishment_id
+            ? Establishment::find($establishment->parent_establishment_id, ['id', 'name', 'code'])
+            : null;
+
+        $childrenCount = Establishment::where('parent_establishment_id', $establishment->id)->count();
+
         return response()->json([
             'establishment' => $establishment,
             'admins'        => $admins,
             'users_count'   => User::where('establishment_id', $establishment->id)->count(),
+            'parent'        => $parent,
+            'children_count'=> $childrenCount,
         ]);
     }
 
     /**
      * Crée un établissement + son admin école + optionnellement la 1ère année.
+     * Peut aussi être créé directement comme ENFANT d'un groupe scolaire si
+     * "parent_establishment_id" est fourni.
      */
-    // public function createEstablishment(Request $request, EstablishmentRoleService $roleService)
-    // {
-    //     $request->validate([
-    //         // Établissement
-    //         'name' => 'required|string|max:255',
-    //         'code' => [
-    //             'required', 'string', 'max:50',
-    //             Rule::unique('establishments', 'code'),
-    //         ],
-    //         // Admin de l'école
-    //         'admin_name'     => 'required|string|max:255',
-    //         'admin_email'    => 'required|email|unique:users,email',
-    //         'admin_phone'    => 'nullable|string|unique:users,phone',
-    //         'admin_password' => 'required|string|min:6',
-    //         // Année scolaire (optionnelle)
-    //         'create_year'    => 'nullable|boolean',
-    //         'year_name'      => 'required_if:create_year,true|nullable|string|max:255',
-    //         'year_start'     => 'required_if:create_year,true|nullable|date',
-    //         'year_end'       => 'required_if:create_year,true|nullable|date|after:year_start',
-    //     ], [
-    //         'code.unique'          => 'Ce code établissement est déjà utilisé.',
-    //         'admin_email.unique'   => 'Cette adresse email est déjà utilisée par un autre compte.',
-    //         'admin_phone.unique'   => 'Ce numéro est déjà utilisé par un autre compte.',
-    //         'year_end.after'       => "La date de fin doit être postérieure à la date de début.",
-    //         'year_name.required_if'=> "Le nom de l'année est requis si vous créez une année.",
-    //     ]);
-
-    //     try {
-    //         $result = DB::transaction(function () use ($request, $roleService) {
-
-    //             // 1. Créer l'établissement
-    //             $establishment = Establishment::create([
-    //                 'name'      => $request->name,
-    //                 'code'      => strtoupper($request->code),
-    //                 'is_active' => true,
-    //             ]);
-
-    //             // 2. Créer les 4 rôles de base pour cet établissement
-    //             $roleService->createDefaultRolesFor($establishment);
-
-    //             // 3. Créer l'admin de l'école
-    //             $admin = User::create([
-    //                 'establishment_id' => $establishment->id,
-    //                 'name'             => $request->admin_name,
-    //                 'email'            => $request->admin_email,
-    //                 'phone'            => $request->admin_phone,
-    //                 'password'         => Hash::make($request->admin_password),
-    //             ]);
-
-    //             // 4. Lui assigner le rôle admin (SCOPÉ à cet établissement)
-    //             $adminRole = Role::where('establishment_id', $establishment->id)
-    //                 ->where('slug', 'admin')
-    //                 ->first();
-    //             if ($adminRole) {
-    //                 $admin->assignRole($adminRole);
-    //             }
-
-    //             // 5. Créer optionnellement la 1ère année scolaire
-    //             $year = null;
-    //             if ($request->create_year) {
-    //                 $year = AcademicYears::create([
-    //                     'establishment_id' => $establishment->id,
-    //                     'name'             => $request->year_name,
-    //                     'start_date'       => $request->year_start,
-    //                     'end_date'         => $request->year_end,
-    //                     'is_active'        => true, // Année en cours par défaut
-    //                     'is_archived'      => false,
-    //                 ]);
-    //             }
-
-    //             return compact('establishment', 'admin', 'year');
-    //         });
-
-    //         return response()->json([
-    //             'status'        => 'success',
-    //             'message'       => "Établissement créé avec succès.",
-    //             'establishment' => $result['establishment'],
-    //             'admin'         => [
-    //                 'id'    => $result['admin']->id,
-    //                 'name'  => $result['admin']->name,
-    //                 'email' => $result['admin']->email,
-    //                 'phone' => $result['admin']->phone,
-    //             ],
-    //             'year'          => $result['year'],
-    //         ], 201);
-
-    //     } catch (\Throwable $e) {
-    //         Log::error('Erreur création établissement : ' . $e->getMessage());
-    //         return response()->json([
-    //             'status'  => 'error',
-    //             'message' => 'Erreur lors de la création.',
-    //             'debug'   => config('app.debug') ? $e->getMessage() : null,
-    //         ], 500);
-    //     }
-    // }
-
     public function createEstablishment(Request $request, EstablishmentRoleService $roleService, \App\Services\EstablishmentPositionService $positionService)
-{
-    $request->validate([
-        // Établissement
-        'name' => 'required|string|max:255',
-        'code' => [
-            'required', 'string', 'max:50',
-            Rule::unique('establishments', 'code'),
-        ],
-        // Admin de l'école
-        'admin_name'     => 'required|string|max:255',
-        'admin_email'    => 'required|email|unique:users,email',
-        'admin_phone'    => 'nullable|string|unique:users,phone',
-        'admin_password' => 'required|string|min:6',
-        // Année scolaire (optionnelle)
-        'create_year'    => 'nullable|boolean',
-        'year_name'      => 'required_if:create_year,true|nullable|string|max:255',
-        'year_start'     => 'required_if:create_year,true|nullable|date',
-        'year_end'       => 'required_if:create_year,true|nullable|date|after:year_start',
-    ], [
-        'code.unique'          => 'Ce code établissement est déjà utilisé.',
-        'admin_email.unique'   => 'Cette adresse email est déjà utilisée par un autre compte.',
-        'admin_phone.unique'   => 'Ce numéro est déjà utilisé par un autre compte.',
-        'year_end.after'       => "La date de fin doit être postérieure à la date de début.",
-        'year_name.required_if'=> "Le nom de l'année est requis si vous créez une année.",
-    ]);
-
-    try {
-        $result = DB::transaction(function () use ($request, $roleService, $positionService) {
-
-            // 1. Créer l'établissement
-            $establishment = Establishment::create([
-                'name'      => $request->name,
-                'code'      => strtoupper($request->code),
-                'is_active' => true,
-            ]);
-
-            // 2. Créer les 4 rôles de base pour cet établissement
-            $roleService->createDefaultRolesFor($establishment);
-
-            // 2bis. Créer les 7 postes RH par défaut pour cet établissement
-            $positionService->createDefaultPositions($establishment);
-
-            // 3. Créer l'admin de l'école
-            $admin = User::create([
-                'establishment_id' => $establishment->id,
-                'name'             => $request->admin_name,
-                'email'            => $request->admin_email,
-                'phone'            => $request->admin_phone,
-                'password'         => Hash::make($request->admin_password),
-            ]);
-
-            // 4. Lui assigner le rôle admin (SCOPÉ à cet établissement)
-            $adminRole = Role::where('establishment_id', $establishment->id)
-                ->where('slug', 'admin')
-                ->first();
-            if ($adminRole) {
-                $admin->assignRole($adminRole);
-            }
-
-            // 5. Créer optionnellement la 1ère année scolaire
-            $year = null;
-            if ($request->create_year) {
-                $year = AcademicYears::create([
-                    'establishment_id' => $establishment->id,
-                    'name'             => $request->year_name,
-                    'start_date'       => $request->year_start,
-                    'end_date'         => $request->year_end,
-                    'is_active'        => true, // Année en cours par défaut
-                    'is_archived'      => false,
-                ]);
-            }
-
-            return compact('establishment', 'admin', 'year');
-        });
-
-        return response()->json([
-            'status'        => 'success',
-            'message'       => "Établissement créé avec succès.",
-            'establishment' => $result['establishment'],
-            'admin'         => [
-                'id'    => $result['admin']->id,
-                'name'  => $result['admin']->name,
-                'email' => $result['admin']->email,
-                'phone' => $result['admin']->phone,
+    {
+        $request->validate([
+            // Établissement
+            'name' => 'required|string|max:255',
+            'code' => [
+                'required', 'string', 'max:50',
+                Rule::unique('establishments', 'code'),
             ],
-            'year'          => $result['year'],
-        ], 201);
+            // Admin de l'école
+            'admin_name'     => 'required|string|max:255',
+            'admin_email'    => 'required|email|unique:users,email',
+            'admin_phone'    => 'nullable|string|unique:users,phone',
+            'admin_password' => 'required|string|min:6',
+            // Année scolaire (optionnelle)
+            'create_year'    => 'nullable|boolean',
+            'year_name'      => 'required_if:create_year,true|nullable|string|max:255',
+            'year_start'     => 'required_if:create_year,true|nullable|date',
+            'year_end'       => 'required_if:create_year,true|nullable|date|after:year_start',
+            // ─── AJOUT : groupe scolaire ───
+            'parent_establishment_id' => 'nullable|exists:establishments,id',
+            'child_quota'             => 'nullable|integer|min:0|max:20',
+        ], [
+            'code.unique'          => 'Ce code établissement est déjà utilisé.',
+            'admin_email.unique'   => 'Cette adresse email est déjà utilisée par un autre compte.',
+            'admin_phone.unique'   => 'Ce numéro est déjà utilisé par un autre compte.',
+            'year_end.after'       => "La date de fin doit être postérieure à la date de début.",
+            'year_name.required_if'=> "Le nom de l'année est requis si vous créez une année.",
+        ]);
 
-    } catch (\Throwable $e) {
-        Log::error('Erreur création établissement : ' . $e->getMessage());
-        return response()->json([
-            'status'  => 'error',
-            'message' => 'Erreur lors de la création.',
-            'debug'   => config('app.debug') ? $e->getMessage() : null,
-        ], 500);
+        // ─── Empêche les chaînes à plusieurs niveaux : un établissement
+        // enfant ne peut jamais lui-même devenir parent d'un autre. ───
+        if ($request->parent_establishment_id) {
+            $parentCandidate = Establishment::find($request->parent_establishment_id);
+            if ($parentCandidate && $parentCandidate->parent_establishment_id) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "Impossible : l'établissement choisi comme parent est lui-même un établissement enfant. Un groupe scolaire ne peut avoir qu'un seul niveau de hiérarchie."
+                ], 422);
+            }
+        }
+
+        try {
+            $result = DB::transaction(function () use ($request, $roleService, $positionService) {
+
+                // 1. Créer l'établissement
+                $establishment = Establishment::create([
+                    'name'      => $request->name,
+                    'code'      => strtoupper($request->code),
+                    'is_active' => true,
+                ]);
+
+                // ─── Assignation DIRECTE des champs groupe scolaire, sans
+                // dépendre du $fillable — évite le piège classique où
+                // create([...]) ignore silencieusement un champ absent du
+                // $fillable du modèle (aucune erreur, mais rien n'est écrit).
+                $establishment->parent_establishment_id = $request->parent_establishment_id ?: null;
+                $establishment->child_quota = $request->parent_establishment_id ? 0 : (int) ($request->child_quota ?? 0);
+                $establishment->save();
+
+                // 2. Créer les 4 rôles de base pour cet établissement
+                $roleService->createDefaultRolesFor($establishment);
+
+                // 2bis. Créer les 7 postes RH par défaut pour cet établissement
+                $positionService->createDefaultPositions($establishment);
+
+                // 3. Créer l'admin de l'école
+                $admin = User::create([
+                    'establishment_id' => $establishment->id,
+                    'name'             => $request->admin_name,
+                    'email'            => $request->admin_email,
+                    'phone'            => $request->admin_phone,
+                    'password'         => Hash::make($request->admin_password),
+                ]);
+
+                // 4. Lui assigner le rôle admin (SCOPÉ à cet établissement)
+                $adminRole = Role::where('establishment_id', $establishment->id)
+                    ->where('slug', 'admin')
+                    ->first();
+                if ($adminRole) {
+                    $admin->assignRole($adminRole);
+                }
+
+                // 5. Créer optionnellement la 1ère année scolaire
+                $year = null;
+                if ($request->create_year) {
+                    $year = AcademicYears::create([
+                        'establishment_id' => $establishment->id,
+                        'name'             => $request->year_name,
+                        'start_date'       => $request->year_start,
+                        'end_date'         => $request->year_end,
+                        'is_active'        => true, // Année en cours par défaut
+                        'is_archived'      => false,
+                    ]);
+                }
+
+                return compact('establishment', 'admin', 'year');
+            });
+
+            return response()->json([
+                'status'        => 'success',
+                'message'       => "Établissement créé avec succès.",
+                'establishment' => $result['establishment'],
+                'admin'         => [
+                    'id'    => $result['admin']->id,
+                    'name'  => $result['admin']->name,
+                    'email' => $result['admin']->email,
+                    'phone' => $result['admin']->phone,
+                ],
+                'year'          => $result['year'],
+            ], 201);
+
+        } catch (\Throwable $e) {
+            Log::error('Erreur création établissement : ' . $e->getMessage());
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Erreur lors de la création.',
+                'debug'   => config('app.debug') ? $e->getMessage() : null,
+            ], 500);
+        }
     }
-}
 
     /**
-     * Modifier un établissement (nom + code)
+     * Modifier un établissement (nom + code + quota d'établissements affiliés)
      */
-    public function updateEstablishment(Request $request,string $id)
+    public function updateEstablishment(Request $request, string $id)
     {
         $establishment = Establishment::findOrFail($id);
 
@@ -349,17 +287,52 @@ class SuperAdminApiController extends Controller
                 'sometimes', 'string', 'max:50',
                 Rule::unique('establishments', 'code')->ignore($establishment->id),
             ],
+            // ─── AJOUT : modification du quota groupe scolaire ───
+            'child_quota' => 'sometimes|integer|min:0|max:20',
         ]);
 
-        $establishment->update([
-            'name' => $request->name ?? $establishment->name,
-            'code' => $request->code ? strtoupper($request->code) : $establishment->code,
-        ]);
+        // Le quota n'a de sens que sur un établissement qui n'est pas
+        // lui-même un enfant (pas de sous-groupe à 2 niveaux).
+        if ($request->has('child_quota') && $establishment->parent_establishment_id) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Un établissement enfant ne peut pas avoir son propre quota d'établissements affiliés."
+            ], 422);
+        }
+
+        $establishment->name = $request->name ?? $establishment->name;
+        $establishment->code = $request->code ? strtoupper($request->code) : $establishment->code;
+        if ($request->has('child_quota')) {
+            $establishment->child_quota = (int) $request->child_quota;
+        }
+        $establishment->save();
 
         return response()->json([
             'status'        => 'success',
             'message'       => 'Établissement mis à jour.',
             'establishment' => $establishment,
+        ]);
+    }
+
+    /**
+     * Liste les établissements ENFANTS d'un établissement parent donné.
+     * GET /superadmin/establishments/{id}/children
+     */
+    public function listEstablishmentChildren(string $id)
+    {
+        $establishment = Establishment::findOrFail($id);
+
+        $children = Establishment::where('parent_establishment_id', $establishment->id)
+            ->withCount(['users', 'academicYears'])
+            ->orderBy('created_at')
+            ->get();
+
+        return response()->json([
+            'status'          => 'success',
+            'parent'          => $establishment->only(['id', 'name', 'code', 'child_quota']),
+            'children'        => $children,
+            'quota_used'      => $children->count(),
+            'quota_remaining' => max(0, $establishment->child_quota - $children->count()),
         ]);
     }
 
@@ -393,6 +366,15 @@ class SuperAdminApiController extends Controller
     public function deleteEstablishment(string $id)
     {
         $establishment = Establishment::findOrFail($id);
+
+        // ─── Empêche de supprimer un parent qui a encore des enfants ───
+        $childrenCount = Establishment::where('parent_establishment_id', $establishment->id)->count();
+        if ($childrenCount > 0) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Impossible de supprimer cet établissement : il a encore {$childrenCount} établissement(s) affilié(s). Supprimez-les d'abord, ou détachez-les."
+            ], 422);
+        }
 
         $name = $establishment->name;
         $establishment->delete(); // cascade défini dans les migrations
@@ -484,10 +466,6 @@ class SuperAdminApiController extends Controller
     // PROFIL DU SUPERADMIN CONNECTÉ
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Renvoie le profil du SuperAdmin actuellement connecté.
-     * GET /superadmin/me
-     */
     public function me(Request $request)
     {
         /** @var SuperAdmin $superAdmin */
@@ -504,10 +482,6 @@ class SuperAdminApiController extends Controller
         ]);
     }
 
-    /**
-     * Modifie les informations personnelles du SuperAdmin connecté.
-     * PUT /superadmin/me
-     */
     public function updateProfile(Request $request)
     {
         /** @var SuperAdmin $superAdmin */
@@ -533,10 +507,6 @@ class SuperAdminApiController extends Controller
         ]);
     }
 
-    /**
-     * Change le mot de passe du SuperAdmin connecté.
-     * PUT /superadmin/me/password
-     */
     public function updatePassword(Request $request)
     {
         /** @var SuperAdmin $superAdmin */
