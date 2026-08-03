@@ -18,6 +18,7 @@ class Positions extends Model
         'name',
         'slug',
         'is_active',
+        'establishment_id', 
     ];
 
     /**

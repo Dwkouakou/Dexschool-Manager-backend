@@ -17,12 +17,14 @@ class Employee extends Model
      use HasFactory, SoftDeletes, BelongsToEstablishment;
 
     protected $fillable = [
-        'user_id', 'position_id', 'matricule', 'last_name', 'first_name', 
-        'gender', 'phone', 'email', 'address', 'photo', 'specialty', 'hire_date', 'status'
+        'user_id', 'position_id', 'matricule', 'last_name', 'first_name',
+        'gender', 'phone', 'email', 'address', 'photo', 'specialty', 'hire_date', 'status',
+        'multi_cycle_access', // ← AJOUT : autorise l'attribution de rôles dans d'autres établissements du même groupe scolaire
     ];
 
     protected $casts = [
         'hire_date' => 'date',
+        'multi_cycle_access' => 'boolean',
     ];
 
     public function position() {

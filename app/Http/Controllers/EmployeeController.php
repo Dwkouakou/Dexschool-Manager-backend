@@ -17,16 +17,20 @@ use Illuminate\Validation\ValidationException;
 class EmployeeController extends Controller
 {
     /**
-     * Liste globale de tous les employés avec poste et contrat actif.
-     * URL : GET /api/employees
+     * Liste globale des employés avec leur poste et contrat actif.
      */
+
+
+    /**
+ * Liste globale de tous les employés avec poste et contrat actif.
+ * URL : GET /api/employees
+ */
     public function index()
     {
         try {
             // Chargement optimisé avec les relations indispensables
-            // (Employee a le trait BelongsToEstablishment -> déjà scopé par établissement)
             $employees = Employee::with([
-                'position',
+                'position', 
                 'contracts' => function ($query) {
                     // On cible uniquement le contrat actuellement actif
                     $query->where('status', 'active');
@@ -53,9 +57,10 @@ class EmployeeController extends Controller
                     'specialty'     => $emp->specialty, // Matière d'enseignement
                     'hire_date'     => $emp->hire_date ? $emp->hire_date->format('Y-m-d') : null,
                     'status'        => $emp->status,
+                    'multi_cycle_access' => (bool) $emp->multi_cycle_access,
                     'photo'         => $emp->photo,
                     'position_id'   => $emp->position_id,
-
+                    
                     // Envoi de l'objet de poste simplifié
                     'position'      => $emp->position ? [
                         'id'   => $emp->position->id,
@@ -91,7 +96,7 @@ class EmployeeController extends Controller
     public function getPositions()
     {
         try {
-            // Positions a le trait BelongsToEstablishment -> déjà scopé par établissement
+            // Récupère uniquement les postes cochés comme actifs, triés par ordre alphabétique
             $positions = Positions::where('is_active', 1)
                 ->orderBy('name', 'asc')
                 ->get(['id', 'name', 'slug']); // Optimisation : on ne prend que les colonnes utiles
@@ -109,9 +114,13 @@ class EmployeeController extends Controller
 
 
     /**
-     * Enregistrement d'un nouvel employé + initialisation de son premier contrat.
-     * URL : POST /api/employees
+     * Enregistrement d'un nouvel employé + son contrat initial.
      */
+
+    /**
+ * Enregistrement d'un nouvel employé + initialisation de son premier contrat.
+ * URL : POST /api/employees
+ */
     public function store(Request $request)
     {
         // 1. Validation stricte des données d'identité et du volet financier contractuel
@@ -126,40 +135,36 @@ class EmployeeController extends Controller
             'specialty'     => ['nullable', 'string', 'max:100'], // Matière d'enseignement si Enseignant
             'hire_date'     => ['required', 'date'],
             'photo'         => ['nullable', 'image', 'mimes:jpeg,png,jpg', 'max:2048'], // Max 2 Mo
-
+            
             // Validation du contrat initial (Montants entiers pour le Franc CFA)
             'contract_type' => ['required', 'in:CDI,CDD,vacation,stage'],
             'base_salary'   => ['required', 'integer', 'min:0'],
             'start_date'    => ['required', 'date'],
             'end_date'      => ['nullable', 'date', 'after:start_date'],
+
+            // ─── AJOUT : accès multi-cycle (groupe scolaire) ───
+            'multi_cycle_access' => ['nullable', 'boolean'],
         ]);
 
         // 2. Traitement sécurisé encapsulé dans une transaction de base de données
-        return DB::transaction(function () use ($request, $validated) {
-
-            // ─── Génération du matricule, PRÉFIXÉ PAR ÉTABLISSEMENT ───
-            // Format : EMP-{PREFIXE_ETABLISSEMENT}-{ANNEE}-{COMPTEUR}
-            // Ex: EMP-MFO-2026-00001 — évite toute collision entre deux écoles.
-            $estabPrefix = current_establishment_prefix();
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($request, $validated) {
+            
+            // Génération dynamique du matricule unique : EMP-ANNEE-COMPTEUR SÉQUENTIEL
             $currentYear = date('Y');
-            $matriculePrefix = "EMP-{$estabPrefix}-{$currentYear}-";
-
-            // Employee a le trait BelongsToEstablishment -> cette requête est
-            // déjà automatiquement scopée à l'établissement courant, le
-            // compteur repart donc bien à 1 pour chaque nouvelle école.
-            $lastEmployee = Employee::withTrashed()
-                ->where('matricule', 'LIKE', $matriculePrefix . '%')
+            $lastEmployee = Employee::withTrashed() // <-- FORCE L'INCLUSION DES EMPLOYÉS SUPPRIMÉS
+                ->whereRaw("matricule LIKE 'EMP-{$currentYear}-%'")
                 ->latest('id')
                 ->first();
 
             if ($lastEmployee) {
+                // Extrait les 5 derniers chiffres et ajoute 1
                 $lastNumber = (int) substr($lastEmployee->matricule, -5);
                 $nextNumber = $lastNumber + 1;
             } else {
                 $nextNumber = 1;
             }
 
-            $matricule = $matriculePrefix . str_pad($nextNumber, 5, '0', STR_PAD_LEFT);
+            $matricule = 'EMP-' . $currentYear . '-' . str_pad($nextNumber, 5, '0', STR_PAD_LEFT);
 
             // Traitement de la photo d'identité de l'employé
             $photoPath = null;
@@ -182,6 +187,7 @@ class EmployeeController extends Controller
                 'hire_date'   => $validated['hire_date'],
                 'photo'       => $photoPath ? '/storage/' . $photoPath : null,
                 'status'      => 'active', // Actif d'office à l'embauche
+                'multi_cycle_access' => $validated['multi_cycle_access'] ?? false,
             ]);
 
             // 4. Création immédiate de sa fiche contractuelle financière liée (Franc CFA)
@@ -205,14 +211,16 @@ class EmployeeController extends Controller
 
 
     /**
-     * Fiche individuelle détaillée d'un employé avec ses historiques (Contrats & Paie).
-     * URL : GET /api/employees/{id}
+     * Fiche individuelle détaillée d'un employé.
      */
+   /**
+ * Fiche individuelle détaillée d'un employé avec ses historiques (Contrats & Paie).
+ * URL : GET /api/employees/{id}
+ */
     public function show(string $id)
     {
         try {
             // Chargement en cascade de tout le dossier RH de l'employé
-            // (Employee scopé par le trait -> 404 automatique si autre établissement)
             $employee = Employee::with([
                 'position',
                 'contracts' => function ($query) {
@@ -237,7 +245,8 @@ class EmployeeController extends Controller
                 'specialty'    => $employee->specialty, // Discipline si enseignant
                 'hire_date'    => $employee->hire_date ? $employee->hire_date->format('Y-m-d') : null,
                 'status'       => $employee->status, // active, suspended, left
-
+                'multi_cycle_access' => (bool) $employee->multi_cycle_access, // ← AJOUT : manquait, d'où l'affichage toujours "Désactivé"
+                
                 // Objet Poste
                 'position' => $employee->position ? [
                     'id'   => $employee->position->id,
@@ -295,79 +304,81 @@ class EmployeeController extends Controller
     }
 
     /**
-     * Modification des informations d'identité et du statut d'un employé.
-     * URL : PUT /api/employees/{id}
-     */
-    public function update(Request $request, string $id)
-    {
-        try {
-            // Employee scopé par le trait -> 404 automatique si autre établissement
-            $employee = Employee::findOrFail($id);
+ * Modification des informations d'identité et du statut d'un employé.
+ * URL : PUT /api/employees/{id}
+ */
+        public function update(Request $request, string $id)
+{
+    try {
+        $employee = Employee::findOrFail($id);
 
-            // 1. Validation stricte des informations modifiées
-            $validated = $request->validate([
-                'position_id' => ['required', 'exists:positions,id'],
-                'last_name'   => ['required', 'string', 'max:100'],
-                'first_name'  => ['required', 'string', 'max:150'],
-                'gender'      => ['required', 'in:M,F'],
-                'phone'       => ['required', 'string', 'max:25'],
-                // L'email doit être unique, mais on ignore l'ID de cet employé actuel
-                'email'       => ['nullable', 'email', 'max:100', Rule::unique('employees', 'email')->ignore($id)],
-                'address'     => ['nullable', 'string', 'max:255'],
-                'specialty'   => ['nullable', 'string', 'max:100'], // Enseignant
-                'hire_date'   => ['required', 'date'],
-                'status'      => ['required', 'in:active,suspended,left'], // Contrôle du statut RH
-            ]);
+        // 1. Validation stricte des informations modifiées
+        $validated = $request->validate([
+            'position_id' => ['required', 'exists:positions,id'],
+            'last_name'   => ['required', 'string', 'max:100'],
+            'first_name'  => ['required', 'string', 'max:150'],
+            'gender'      => ['required', 'in:M,F'],
+            'phone'       => ['required', 'string', 'max:25'],
+            // L'email doit être unique, mais on ignore l'ID de cet employé actuel
+            'email'       => ['nullable', 'email', 'max:100', Rule::unique('employees', 'email')->ignore($id)],
+            'address'     => ['nullable', 'string', 'max:255'],
+            'specialty'   => ['nullable', 'string', 'max:100'], // Enseignant
+            'hire_date'   => ['required', 'date'],
+            'status'      => ['required', 'in:active,suspended,left'], // Contrôle du statut RH
 
-            // 2. Formatage standardisé des noms (Standard RH de l'établissement)
-            $validated['last_name']  = strtoupper($validated['last_name']);
-            $validated['first_name'] = ucwords(strtolower($validated['first_name']));
+            // ─── AJOUT : accès multi-cycle (groupe scolaire) ───
+            'multi_cycle_access' => ['nullable', 'boolean'],
+        ]);
 
-            // 3. Mise à jour en base de données
-            $employee->update($validated);
+        // 2. Formatage standardisé des noms (Standard RH de l'établissement)
+        $validated['last_name']  = strtoupper($validated['last_name']);
+        $validated['first_name'] = ucwords(strtolower($validated['first_name']));
 
-            return response()->json([
-                'status'  => 'success',
-                'message' => 'Les informations du dossier RH ont été mises à jour avec succès.'
-            ], 200);
+        // 3. Mise à jour en base de données
+        $employee->update($validated);
 
-        } catch (ValidationException $e) {
-            // Intercepte les erreurs de saisie (Ex: date mal formatée) et renvoie le détail à React
-            return response()->json([
-                'status'  => 'error',
-                'message' => 'Erreur de validation des données de la fiche RH.',
-                'errors'  => $e->errors()
-            ], 422);
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Les informations du dossier RH ont été mises à jour avec succès.'
+        ], 200);
 
-        } catch (ModelNotFoundException $e) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => "Dossier permanent de l'employé introuvable en base de données."
-            ], 404);
+    } catch (ValidationException $e) {
+        // Intercepte les erreurs de saisie (Ex: date mal formatée) et renvoie le détail à React
+        return response()->json([
+            'status'  => 'error',
+            'message' => 'Erreur de validation des données de la fiche RH.',
+            'errors'  => $e->errors()
+        ], 422);
 
-        } catch (\Exception $e) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => 'Une erreur imprévue est survenue lors de la mise à jour.',
-                'debug'   => $e->getMessage()
-            ], 500);
-        }
+    } catch (ModelNotFoundException $e) {
+        return response()->json([
+            'status'  => 'error',
+            'message' => "Dossier permanent de l'employé introuvable en base de données."
+        ], 404);
+
+    } catch (\Exception $e) {
+        return response()->json([
+            'status'  => 'error',
+            'message' => 'Une erreur imprévue est survenue lors de la mise à jour.',
+            'debug'   => $e->getMessage()
+        ], 500);
     }
+}
 
     /**
-     * Archivage / Suppression logique d'un employé (Soft Delete).
-     * URL : DELETE /api/employees/{id}
-     */
+ * Archivage / Suppression logique d'un employé (Soft Delete).
+ * URL : DELETE /api/employees/{id}
+ */
     public function destroy(string $id)
     {
         try {
-            // 1. Recherche du dossier de l'employé (scopé par le trait)
+            // 1. Recherche du dossier de l'employé
             $employee = Employee::findOrFail($id);
 
             // 2. Action de sécurité RH : On passe son statut à 'left' (A quitté l'établissement)
             // et on désactive son contrat actuel pour couper les calculs de paie automatiques
             $employee->update(['status' => 'left']);
-
+            
             EmployeeContrat::where('employee_id', $employee->id)
                 ->where('status', 'active')
                 ->update(['status' => 'expired']);
@@ -402,7 +413,7 @@ class EmployeeController extends Controller
      */
     public function addContract(Request $request, string $id)
     {
-        // 1. Vérifier si l'employé existe bel et bien (scopé par le trait)
+        // 1. Vérifier si l'employé existe bel et bien
         $employee = Employee::findOrFail($id);
 
         // 2. Validation stricte de la nouvelle fiche contractuelle (FCFA)
@@ -416,7 +427,7 @@ class EmployeeController extends Controller
 
         // 3. Exécution sécurisée dans une transaction de base de données
         return DB::transaction(function () use ($employee, $validated) {
-
+            
             // A. Passer automatiquement tous les anciens contrats de cet employé au statut 'expired'
             EmployeeContrat::where('employee_id', $employee->id)
                 ->where('status', 'active')
@@ -450,7 +461,7 @@ class EmployeeController extends Controller
     public function terminateContract(string $contract_id)
     {
         try {
-            // 1. Recherche de la fiche de contrat spécifiée (scopée via employee->establishment)
+            // 1. Recherche de la fiche de contrat spécifiée
             $contract = EmployeeContrat::findOrFail($contract_id);
 
             if ($contract->status !== 'active') {
@@ -492,7 +503,7 @@ class EmployeeController extends Controller
     public function payrollsHistory(Request $request)
     {
         try {
-            // 1. Initialisation de la requête (Payroll scopé via employee->establishment)
+            // 1. Initialisation de la requête avec chargement des relations de l'employé et de sa fonction
             $query = Payroll::with(['employee.position']);
 
             // 2. Filtre : Recherche par mot-clé (Nom, prénom ou matricule de l'employé)
@@ -523,13 +534,13 @@ class EmployeeController extends Controller
                     'payment_date'   => $payroll->payment_date ? $payroll->payment_date->format('Y-m-d') : null,
                     'payment_method' => $payroll->payment_method, // cash, virement...
                     'status'         => $payroll->status,         // pending, paid
-
+                    
                     // Montants stricts convertis en entiers pour le Franc CFA
                     'base_salary'    => (int) $payroll->base_salary,
                     'allowances'     => (int) $payroll->allowances, // Primes
                     'deductions'     => (int) $payroll->deductions, // Retenues
                     'net_salary'     => (int) $payroll->net_salary, // Salaire net touché
-
+                    
                     // Inclusion des données d'identité de l'employé
                     'employee' => $emp ? [
                         'id'         => $emp->id,
@@ -553,9 +564,9 @@ class EmployeeController extends Controller
 
 
     /**
-     * Calcule, valide et génère le bulletin de paie mensuel d'un employé.
-     * URL : POST /api/payrolls
-     */
+ * Calcule, valide et génère le bulletin de paie mensuel d'un employé.
+ * URL : POST /api/payrolls
+ */
     public function generatePayroll(Request $request)
     {
         // 1. Validation stricte des flux financiers entrants (FCFA entiers positifs)
@@ -569,7 +580,6 @@ class EmployeeController extends Controller
         ]);
 
         // 2. Sécurité anti-doublon : Un employé ne peut recevoir qu'un seul bulletin par mois comptable
-        // (Payroll scopé via employee->establishment, donc déjà isolé par école)
         $exists = Payroll::where('employee_id', $validated['employee_id'])
             ->where('salary_month', $validated['salary_month'])
             ->exists();
@@ -582,7 +592,6 @@ class EmployeeController extends Controller
         }
 
         // 3. Récupération du contrat actif pour obtenir le salaire fixe contractuel de base
-        // (Employee scopé par le trait -> 404 automatique si autre établissement)
         $employee = Employee::with(['activeContract'])->findOrFail($validated['employee_id']);
         $contract = $employee->activeContract;
 
@@ -597,38 +606,33 @@ class EmployeeController extends Controller
         $baseSalary = (int) $contract->base_salary;
         $allowances = (int) $validated['allowances'];
         $deductions = (int) $validated['deductions'];
-
+        
         // Formule comptable standard : Net = Base + Primes - Retenues
         $netSalary = ($baseSalary + $allowances) - $deductions;
-
+        
         // Sécurité : Un salaire net ne peut pas être inférieur à 0 FCFA
         if ($netSalary < 0) {
             $netSalary = 0;
         }
 
         // 5. Exécution sécurisée dans une transaction SQL
-        return DB::transaction(function () use ($validated, $contract, $baseSalary, $netSalary, $allowances, $deductions) {
-
-            // ─── Génération du numéro de bulletin, PRÉFIXÉ PAR ÉTABLISSEMENT ───
-            // Format : PAY-{PREFIXE_ETABLISSEMENT}-{ANNEEMOIS}-{COMPTEUR}
-            // Ex: PAY-MFO-202606-0001 — évite toute collision entre deux écoles
-            // ayant émis un bulletin le même mois comptable.
-            $estabPrefix = current_establishment_prefix();
+        return DB::transaction(function () use ($validated, $contract, $baseSalary, $netSalary , $allowances, $deductions) {
+            
+            // Génération de la pièce comptable séquentielle unique : PAY-ANNEEMOIS-COMPTEUR
             $monthClean = str_replace('-', '', $validated['salary_month']); // Supprime le tiret (ex: 202606)
-            $payrollPrefix = "PAY-{$estabPrefix}-{$monthClean}-";
-
-            $lastPayroll = Payroll::where('payroll_number', 'LIKE', $payrollPrefix . '%')
+            $lastPayroll = Payroll::whereRaw("payroll_number LIKE 'PAY-{$monthClean}-%'")
                 ->latest('id')
                 ->first();
 
             if ($lastPayroll) {
+                // Extrait les 4 derniers caractères numériques et ajoute 1
                 $lastNumber = (int) substr($lastPayroll->payroll_number, -4);
                 $nextNumber = $lastNumber + 1;
             } else {
                 $nextNumber = 1;
             }
 
-            $payrollNumber = $payrollPrefix . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+            $payrollNumber = 'PAY-' . $monthClean . '-' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
 
             // Enregistrement final de l'écriture de paie
             $payroll = Payroll::create([
@@ -657,14 +661,13 @@ class EmployeeController extends Controller
 
 
     /**
-     * Édition et impression papier du bulletin de paie (Format comptable).
-     * URL : GET /api/payrolls/receipt/{id}
-     */
+ * Édition et impression papier du bulletin de paie (Format comptable).
+ * URL : GET /api/payrolls/receipt/{id}
+ */
     public function printPayrollSlip(string $id)
     {
         try {
             // 1. Récupération du bulletin avec l'employé et son poste rattaché
-            // (Payroll scopé via employee->establishment)
             $payroll = Payroll::with(['employee.position'])->findOrFail($id);
             $emp = $payroll->employee;
 
@@ -709,15 +712,15 @@ class EmployeeController extends Controller
             </head>
             <body onload='window.print(); window.close();'>
                 <div class='slip-container'>
-
+                    
                     <!-- En-tête de la pièce -->
                     <div class='header'>
                         <h2>BULLETIN DE PAIE</h2>
                         <p>DEXSCHOOL MANAGER — JOURNAL DE PAIE RH</p>
                     </div>
-
+                    
                     <div class='divider'></div>
-
+                    
                     <!-- Métadonnées du bulletin -->
                     <div class='flex-row'>
                         <span><span class='bold'>Pièce N° :</span> {$payroll->payroll_number}</span>
@@ -726,17 +729,17 @@ class EmployeeController extends Controller
                     <div class='flex-row'>
                         <span><span class='bold'>Date d'Émission :</span> {$datePaiement}</span>
                     </div>
-
+                    
                     <div class='double-divider'></div>
-
+                    
                     <!-- Informations administratives du salarié -->
                     <p><span class='bold'>MATRICULE  :</span> {$emp->matricule}</p>
                     <p><span class='bold'>EMPLOYÉ(E) :</span> " . strtoupper($emp->last_name) . " {$emp->first_name}</p>
                     <p><span class='bold'>FONCTION   :</span> " . ($emp->position ? strtoupper($emp->position->name) : 'N/A') . "</p>
                     " . ($emp->specialty ? "<p><span class='bold'>DISCIPLINES:</span> " . strtoupper($emp->specialty) . "</p>" : "") . "
-
+                    
                     <div class='double-divider'></div>
-
+                    
                     <!-- Ventilation financière en Francs CFA -->
                     <div class='flex-row'>
                         <span>Salaire de Base Fixe Contractuel :</span>
@@ -750,20 +753,20 @@ class EmployeeController extends Controller
                         <span>(-) Retenues, Avances & Absences :</span>
                         <span>- " . number_format($payroll->deductions, 0, '', ' ') . " FCFA</span>
                     </div>
-
+                    
                     <div class='double-divider'></div>
-
+                    
                     <!-- Pied de bulletin : Net à payer global -->
                     <div class='flex-row amount-box'>
                         <span>NET À PERCEVOIR :</span>
                         <span>" . number_format($payroll->net_salary, 0, '', ' ') . " FCFA</span>
                     </div>
-
+                    
                     <div class='divider'></div>
-
+                    
                     <!-- Traçabilité comptable -->
                     <p style='margin: 5px 0; font-size: 11px;'><span class='bold'>Mode de règlement :</span> {$moyenPaiement}</p>
-
+                    
                     <div class='flex-row' style='margin-top: 30px; font-size: 11px;'>
                         <div style='text-align: center; width: 45%;'>
                             <p class='bold'>Émargement Salarié</p>
@@ -786,4 +789,12 @@ class EmployeeController extends Controller
             return "<html><body><p style='color:red; font-family:sans-serif;'>Erreur technique : " . $e->getMessage() . "</p></body></html>";
         }
     }
+
+
+
+
+
+
+
+
 }

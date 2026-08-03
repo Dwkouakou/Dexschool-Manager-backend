@@ -17,7 +17,6 @@ class AdminApiController extends Controller
 
     // ─────────────────────────────────────────────────────────────────────────
     // CONNEXION UTILISATEUR STANDARD (non-admin) — 1 seule étape
-    // Directement sur l'année active définie par l'Admin de l'établissement
     // ─────────────────────────────────────────────────────────────────────────
     public function loginUser(Request $request)
     {
@@ -57,7 +56,6 @@ class AdminApiController extends Controller
                 ], 401);
             }
 
-            // ── Garde-fou : un Admin doit passer par /admin-login (2 étapes) ──
             $isAdmin = $user->roles()->where('slug', 'admin')->exists();
             if ($isAdmin) {
                 return response()->json([
@@ -66,9 +64,6 @@ class AdminApiController extends Controller
                 ], 403);
             }
 
-            // ── Garde-fou : un compte sans AUCUN rôle assigné ne peut pas se
-            // connecter — il n'aurait accès à rien une fois dedans, et ça
-            // évite une session "fantôme" confuse pour l'utilisateur.
             if ($user->roles()->count() === 0) {
                 return response()->json([
                     'status'  => 'error',
@@ -76,7 +71,6 @@ class AdminApiController extends Controller
                 ], 403);
             }
 
-            // ── Année active définie par l'Admin — aucun choix laissé au user ──
             $activeYear = AcademicYears::where('establishment_id', $establishment->id)
                 ->where('is_active', true)
                 ->first();
@@ -88,8 +82,20 @@ class AdminApiController extends Controller
                 ], 403);
             }
 
-            $user->tokens()->delete(); // une seule session active à la fois
-            $user->update(['viewing_year_id' => $activeYear->id]);
+            $user->tokens()->delete();
+
+            // ─── AJOUT CRITIQUE : réinitialise le contexte de switch groupe
+            // scolaire à CHAQUE connexion. Assignation DIRECTE (pas ->update())
+            // pour contourner le piège classique : si "viewing_establishment_id"
+            // n'est pas listé dans le $fillable du modèle User, ->update([...])
+            // l'ignorerait silencieusement (aucune erreur, mais rien n'est écrit).
+            // Sans ce reset, un utilisateur qui avait switché vers un
+            // établissement affilié lors d'une session précédente resterait
+            // "coincé" dessus indéfiniment, même après déconnexion/reconnexion. ───
+            $user->viewing_year_id = $activeYear->id;
+            $user->viewing_establishment_id = null;
+            $user->save();
+
             $token = $user->createToken('main_token', ['*'])->plainTextToken;
 
             $roleName = null;
@@ -172,7 +178,6 @@ class AdminApiController extends Controller
                 ], 401);
             }
 
-            // ── Garde-fou : seul un Admin peut choisir son année ──
             $isAdmin = $user->roles()->where('slug', 'admin')->exists();
             if (!$isAdmin) {
                 return response()->json([
@@ -181,8 +186,12 @@ class AdminApiController extends Controller
                 ], 403);
             }
 
-            // Nettoyer anciens tokens temporaires
             $user->tokens()->where('name', 'temp_token')->delete();
+
+            // ─── AJOUT : réinitialise le switch groupe scolaire dès l'étape 1,
+            // assignation DIRECTE (contourne le piège du $fillable). ───
+            $user->viewing_establishment_id = null;
+            $user->save();
 
             $tempToken = $user->createToken('temp_token', ['select-academic-year'])->plainTextToken;
 
@@ -190,7 +199,6 @@ class AdminApiController extends Controller
                 ->orderBy('start_date', 'desc')
                 ->get();
 
-            // ⚠️ Récupération du rôle blindée — si l'user n'a pas de rôle assigné, on renvoie null
             $roleName = null;
             try {
                 $roleName = $user->getRoleNames()->first();
@@ -231,12 +239,11 @@ class AdminApiController extends Controller
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ÉTAPE 2 — Sélection de l'année (BLINDÉE avec try/catch et log)
+    // ÉTAPE 2 — Sélection de l'année
     // ─────────────────────────────────────────────────────────────────────────
     public function selectYear(Request $request)
     {
         try {
-            // Sécurité : ce token doit venir de l'étape 1 uniquement
             if (!$request->user()->tokenCan('select-academic-year')) {
                 return response()->json([
                     'status'  => 'error',
@@ -261,14 +268,17 @@ class AdminApiController extends Controller
                 ], 403);
             }
 
-            // Révoker le token temporaire
             $request->user()->currentAccessToken()->delete();
 
-            // Créer le token final
-            $user->update(['viewing_year_id' => $year->id]);
+            // ─── AJOUT : re-confirme le reset ici aussi, assignation DIRECTE
+            // (filet de sécurité supplémentaire, au cas où l'étape 1 aurait
+            // été contournée + contourne le piège du $fillable). ───
+            $user->viewing_year_id = $year->id;
+            $user->viewing_establishment_id = null;
+            $user->save();
+
             $finalToken = $user->createToken('main_token', ['*'])->plainTextToken;
 
-            // ⚠️ Chargement des relations avec try/catch chacun
             $establishmentData = null;
             try {
                 $user->load('establishment');
@@ -277,10 +287,9 @@ class AdminApiController extends Controller
                 Log::warning("Impossible de charger establishment pour user {$user->id} : " . $e->getMessage());
             }
 
-            // ⚠️ Le load('periods') plante peut-être — on protège
             $yearData = $year->toArray();
             try {
-                $yearData['periods'] = $year->periods; // charge la relation
+                $yearData['periods'] = $year->periods;
             } catch (\Throwable $e) {
                 Log::warning("Impossible de charger periods pour year {$year->id} : " . $e->getMessage());
                 $yearData['periods'] = [];
@@ -310,7 +319,6 @@ class AdminApiController extends Controller
         } catch (\Illuminate\Validation\ValidationException $e) {
             return response()->json(['errors' => $e->errors()], 422);
         } catch (\Throwable $e) {
-            // LOG COMPLET DE L'ERREUR — c'est ça qu'on veut voir
             Log::error('❌ Erreur selectYear : ' . $e->getMessage(), [
                 'file'  => $e->getFile(),
                 'line'  => $e->getLine(),
@@ -417,7 +425,8 @@ class AdminApiController extends Controller
             ], 403);
         }
 
-        $user->update(['viewing_year_id' => $year->id]);
+        $user->viewing_year_id = $year->id;
+        $user->save();
 
         return response()->json([
             'status'  => 'success',
@@ -428,25 +437,25 @@ class AdminApiController extends Controller
 
 
     // ─────────────────────────────────────────────────────────────────────────
-// LISTE DES RÔLES DISPONIBLES POUR L'ÉTABLISSEMENT (pour le select React)
-// ─────────────────────────────────────────────────────────────────────────
-public function listRoles(Request $request)
-{
-    $user = $request->user();
+    // LISTE DES RÔLES DISPONIBLES POUR L'ÉTABLISSEMENT
+    // ─────────────────────────────────────────────────────────────────────────
+    public function listRoles(Request $request)
+    {
+        $user = $request->user();
 
-    $roles = \Spatie\Permission\Models\Role::where('establishment_id', $user->establishment_id)
-        ->orderBy('is_locked', 'desc') // Admin en premier
-        ->get(['id', 'name', 'slug', 'description', 'is_locked']);
+        $roles = \Spatie\Permission\Models\Role::where('establishment_id', $user->establishment_id)
+            ->orderBy('is_locked', 'desc')
+            ->get(['id', 'name', 'slug', 'description', 'is_locked']);
 
-    return response()->json([
-        'status' => 'success',
-        'roles'  => $roles,
-    ]);
-}
+        return response()->json([
+            'status' => 'success',
+            'roles'  => $roles,
+        ]);
+    }
 
-// ─────────────────────────────────────────────────────────────────────────
-// CRÉATION D'UN UTILISATEUR STANDARD (par l'Admin de l'établissement)
-// ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // CRÉATION D'UN UTILISATEUR STANDARD (par l'Admin de l'établissement)
+    // ─────────────────────────────────────────────────────────────────────────
     public function createUser(Request $request)
     {
         $adminUser = $request->user();
@@ -462,7 +471,6 @@ public function listRoles(Request $request)
             'phone.unique' => "Ce numéro est déjà utilisé.",
         ]);
 
-        // Vérifier que le rôle appartient bien à cet établissement
         $role = \Spatie\Permission\Models\Role::where('id', $validated['role_id'])
             ->where('establishment_id', $adminUser->establishment_id)
             ->first();
@@ -474,7 +482,6 @@ public function listRoles(Request $request)
             ], 422);
         }
 
-        // Empêcher la création d'un 2ᵉ admin via ce formulaire (sécurité)
         if ($role->slug === 'admin') {
             return response()->json([
                 'status'  => 'error',

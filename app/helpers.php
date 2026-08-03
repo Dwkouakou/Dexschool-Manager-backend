@@ -6,7 +6,23 @@ if (!function_exists('current_establishment_id')) {
     function current_establishment_id(): ?int
     {
         $user = Auth::user();
-        return $user->establishment_id ?? null;
+        if (!$user) return null;
+
+        // ─── CORRECTIF CRITIQUE : renvoie l'établissement ACTUELLEMENT
+        // CONSULTÉ (viewing_establishment_id, rempli uniquement par
+        // AffiliatedEstablishmentController::switchTo() après vérification
+        // d'accès légitime), et seulement s'il n'y en a pas, l'établissement
+        // d'ORIGINE du compte (establishment_id).
+        //
+        // Sans ce correctif, TOUTE fonction qui dépend de celle-ci
+        // (current_active_year_id, current_establishment_prefix,
+        // current_school_year_short, et tout contrôleur qui scope
+        // manuellement via current_establishment_id() plutôt que par le
+        // trait Eloquent BelongsToEstablishment) continuerait de raisonner
+        // sur l'établissement d'origine même après un switch — exactement
+        // le même bug que celui déjà corrigé sur le trait, mais resté actif
+        // ici puisque c'est un point de scope totalement séparé. ───
+        return $user->viewing_establishment_id ?? $user->establishment_id ?? null;
     }
 }
 

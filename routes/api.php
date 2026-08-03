@@ -27,6 +27,7 @@ use App\Http\Controllers\SubjectController;
 use App\Http\Controllers\SuperAdminApiController;
 use App\Http\Controllers\TeacherAttributionController;
 use App\Http\Controllers\TransportController;
+use App\Http\Controllers\AffiliatedEstablishmentController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -151,6 +152,12 @@ Route::put("/academic-years/{id}/activate", [AcademicYearsController::class, "ac
 
 Route::middleware('auth:sanctum')->group(function () {
 
+    Route::get('/me/establishment-group', [AffiliatedEstablishmentController::class, 'myGroup']);
+    Route::post('/me/switch-establishment/{id}', [AffiliatedEstablishmentController::class, 'switchTo']);
+    Route::post('/me/affiliated-establishments', [AffiliatedEstablishmentController::class, 'createChildEstablishment']);
+
+  
+
     // Gestion du profile et parametres 
     Route::get('/settings/establishment', [EstablishmentSettingsController::class, 'show']);
     Route::post('/settings/establishment', [EstablishmentSettingsController::class, 'update']); // POST — même raison que /me/profile (upload logo)
@@ -209,6 +216,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/roles/{id}', [RolePermissionController::class, 'destroy']);
 
     Route::get('/staff/employees-without-account', [StaffAccountController::class, 'employeesWithoutAccount']);
+    Route::get('/staff/group-roles', [StaffAccountController::class, 'groupRoles']);
     Route::get('/staff/users-with-roles', [StaffAccountController::class, 'usersWithRoles']);
     Route::put('/staff/users/{id}/roles', [StaffAccountController::class, 'updateUserRoles']);
     Route::post('/staff/employees/{id}/create-account', [StaffAccountController::class, 'createAccountForEmployee']);

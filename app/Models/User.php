@@ -27,7 +27,8 @@ class User extends Authenticatable
         "phone",
         'password',
         'viewing_year_id',
-        "photo"
+        "photo",
+        'viewing_establishment_id',
     ];
 
     /**

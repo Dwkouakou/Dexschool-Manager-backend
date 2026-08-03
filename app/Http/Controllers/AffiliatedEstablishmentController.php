@@ -1,0 +1,319 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Academic\AcademicYears;
+use App\Models\Establishment;
+use App\Services\EstablishmentPositionService;
+use App\Services\EstablishmentRoleService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\Rule;
+use Spatie\Permission\Models\Role;
+
+class AffiliatedEstablishmentController extends Controller
+{
+    /**
+     * Formate un établissement pour l'affichage dans le bandeau d'onglets.
+     */
+    private function formatForTabs(Establishment $establishment, $user): array
+    {
+        return [
+            'id'       => $establishment->id,
+            'name'     => $establishment->name,
+            'code'     => $establishment->code,
+            'is_home'  => $establishment->id === $user->establishment_id,
+            'is_root'  => is_null($establishment->parent_establishment_id) && $establishment->child_quota > 0,
+        ];
+    }
+
+    /**
+     * Vérifie si l'utilisateur connecté a un rôle ACTIF réel dans
+     * l'établissement donné (peu importe si c'est son établissement
+     * d'origine ou non).
+     */
+    private function hasActiveRoleIn($user, int $establishmentId): bool
+    {
+        return DB::table('model_has_roles')
+            ->join('roles', 'roles.id', '=', 'model_has_roles.role_id')
+            ->where('model_has_roles.model_type', \App\Models\User::class)
+            ->where('model_has_roles.model_id', $user->id)
+            ->where('roles.establishment_id', $establishmentId)
+            ->exists();
+    }
+
+    /**
+     * Liste tous les établissements du groupe scolaire accessibles à
+     * l'utilisateur connecté (son établissement d'origine + tout
+     * établissement du même groupe où il a un rôle actif réel).
+     *
+     * Si l'établissement de l'utilisateur ne fait partie d'aucun groupe
+     * (cas normal, immense majorité des clients), renvoie juste lui-même
+     * avec "is_group": false — le frontend n'affiche alors aucun onglet.
+     *
+     * GET /me/establishment-group
+     */
+    public function myGroup(Request $request)
+    {
+        $user = $request->user();
+        $home = Establishment::findOrFail($user->establishment_id);
+
+        $isGroup = $home->parent_establishment_id !== null || $home->child_quota > 0;
+
+        if (!$isGroup) {
+            return response()->json([
+                'status'                    => 'success',
+                'is_group'                  => false,
+                'establishments'            => [$this->formatForTabs($home, $user)],
+                'current_establishment_id'  => $user->viewing_establishment_id ?? $user->establishment_id,
+            ]);
+        }
+
+        // Racine du groupe (le parent) — si "home" EST déjà la racine, c'est lui-même
+        $rootId = $home->parent_establishment_id ?? $home->id;
+        $root   = Establishment::find($rootId);
+
+        // Tous les établissements du groupe : la racine + tous ses enfants
+        $groupEstablishments = Establishment::where('id', $rootId)
+            ->orWhere('parent_establishment_id', $rootId)
+            ->get();
+
+        // Filtre : uniquement ceux où l'utilisateur a un rôle actif RÉEL
+        $accessibleIds = DB::table('model_has_roles')
+            ->join('roles', 'roles.id', '=', 'model_has_roles.role_id')
+            ->where('model_has_roles.model_type', \App\Models\User::class)
+            ->where('model_has_roles.model_id', $user->id)
+            ->whereIn('roles.establishment_id', $groupEstablishments->pluck('id'))
+            ->pluck('roles.establishment_id')
+            ->unique();
+
+        $accessible = $groupEstablishments->whereIn('id', $accessibleIds)->values();
+
+        // Sécurité : l'établissement d'origine reste toujours listé, même
+        // dans un cas limite où aucun rôle n'y serait formellement trouvé.
+        if (!$accessible->contains('id', $home->id)) {
+            $accessible->push($home);
+        }
+
+        return response()->json([
+            'status'                    => 'success',
+            'is_group'                  => true,
+            'root_establishment_id'     => $root?->id,
+            'establishments'            => $accessible->map(fn($e) => $this->formatForTabs($e, $user))->values(),
+            'current_establishment_id'  => $user->viewing_establishment_id ?? $user->establishment_id,
+            // Infos de quota — utile pour l'écran "Établissements affiliés",
+            // uniquement pertinent si l'utilisateur est sur l'établissement
+            // racine (celui qui porte le quota).
+            'quota' => $root && $root->id === $home->id ? [
+                'max'       => $root->child_quota,
+                'used'      => Establishment::where('parent_establishment_id', $root->id)->count(),
+                'remaining' => max(0, $root->child_quota - Establishment::where('parent_establishment_id', $root->id)->count()),
+            ] : null,
+        ]);
+    }
+
+    /**
+     * Bascule le contexte de travail vers un autre établissement du groupe.
+     * Vérifie que l'utilisateur y a bien un accès légitime AVANT de faire
+     * quoi que ce soit — jamais de confiance aveugle sur l'ID fourni.
+     *
+     * POST /me/switch-establishment/{id}
+     */
+    public function switchTo(Request $request, string $id)
+    {
+        $user   = $request->user();
+        $target = Establishment::find($id);
+
+        if (!$target) {
+            return response()->json(['status' => 'error', 'message' => "Établissement introuvable."], 404);
+        }
+
+        if (!$target->is_active) {
+            return response()->json(['status' => 'error', 'message' => "Cet établissement est désactivé."], 403);
+        }
+
+        // Vérifie que target appartient bien au MÊME groupe que l'établissement d'origine
+        $home         = Establishment::findOrFail($user->establishment_id);
+        $homeRootId   = $home->parent_establishment_id ?? $home->id;
+        $targetRootId = $target->parent_establishment_id ?? $target->id;
+
+        if ($homeRootId !== $targetRootId) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Vous n'avez pas accès à cet établissement."
+            ], 403);
+        }
+
+        // Vérifie un rôle actif réel sur la cible (sauf si c'est déjà
+        // son établissement d'origine, toujours implicitement autorisé)
+        if ($target->id !== $user->establishment_id && !$this->hasActiveRoleIn($user, $target->id)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Vous n'avez aucun rôle actif dans cet établissement. Contactez l'administrateur."
+            ], 403);
+        }
+
+        // ── Bascule le contexte ──
+        $user->viewing_establishment_id = $target->id;
+
+        // Année active DE CET établissement précis (peut différer par cycle)
+        $activeYear = AcademicYears::withoutGlobalScopes()
+            ->where('establishment_id', $target->id)
+            ->where('is_active', true)
+            ->first();
+
+        $user->viewing_year_id = $activeYear?->id;
+        $user->save();
+
+        // Rôle de l'utilisateur DANS cet établissement précis (peut différer du rôle d'origine)
+        $roleInTarget = DB::table('model_has_roles')
+            ->join('roles', 'roles.id', '=', 'model_has_roles.role_id')
+            ->where('model_has_roles.model_type', \App\Models\User::class)
+            ->where('model_has_roles.model_id', $user->id)
+            ->where('roles.establishment_id', $target->id)
+            ->value('roles.name');
+
+        // Même pattern que loginUser() : une seule session active à la fois
+        $user->tokens()->delete();
+        $newToken = $user->createToken('main_token', ['*'])->plainTextToken;
+
+        return response()->json([
+            'status'        => 'success',
+            'message'       => "Vous gérez maintenant {$target->name}.",
+            'token'         => $newToken,
+            'user'          => [
+                'id'    => $user->id,
+                'name'  => $user->name,
+                'email' => $user->email,
+                'phone' => $user->phone,
+                'role'  => $roleInTarget,
+            ],
+            'establishment' => [
+                'id'   => $target->id,
+                'name' => $target->name,
+                'code' => $target->code,
+            ],
+            'active_year'   => $activeYear,
+        ]);
+    }
+
+    /**
+     * L'Admin crée lui-même un établissement affilié (enfant), depuis son
+     * propre tableau de bord — sans repasser par DexSchool, dans la limite
+     * de son quota. RÉUTILISE le même compte admin (pas de duplication) et
+     * crée automatiquement une année scolaire pour que l'établissement
+     * soit immédiatement utilisable.
+     *
+     * POST /me/affiliated-establishments
+     */
+    public function createChildEstablishment(Request $request)
+    {
+        $user = $request->user();
+
+        $isAdmin = $user->roles()->where('slug', 'admin')->exists();
+        if (!$isAdmin) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Seul l'administrateur peut créer un établissement affilié."
+            ], 403);
+        }
+
+        $home = Establishment::findOrFail($user->establishment_id);
+
+        // Un établissement déjà enfant ne peut pas lui-même créer d'affiliés
+        if ($home->parent_establishment_id) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Un établissement affilié ne peut pas créer d'autres établissements affiliés."
+            ], 403);
+        }
+
+        if ($home->child_quota <= 0) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Votre établissement n'est pas autorisé à créer des établissements affiliés. Contactez le support DexSchool."
+            ], 403);
+        }
+
+        $currentChildrenCount = Establishment::where('parent_establishment_id', $home->id)->count();
+        if ($currentChildrenCount >= $home->child_quota) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Quota atteint : vous avez déjà créé {$currentChildrenCount}/{$home->child_quota} établissement(s) affilié(s)."
+            ], 422);
+        }
+
+        $request->validate([
+            'name'           => 'required|string|max:255',
+            'code'           => ['required', 'string', 'max:50', Rule::unique('establishments', 'code')],
+            'director_title' => 'nullable|string|max:100',
+            'year_name'      => 'nullable|string|max:255',
+            'year_start'     => 'nullable|date',
+            'year_end'       => 'nullable|date|after:year_start',
+        ], [
+            'code.unique' => "Ce code établissement est déjà utilisé.",
+        ]);
+
+        try {
+            $result = DB::transaction(function () use ($request, $home, $user) {
+
+                // ─── Création directe, sans dépendre du $fillable ───
+                $child = new Establishment([
+                    'name'      => $request->name,
+                    'code'      => strtoupper($request->code),
+                    'is_active' => true,
+                ]);
+                $child->parent_establishment_id = $home->id;
+                $child->child_quota             = 0; // un enfant ne peut pas avoir ses propres enfants
+                $child->director_title          = $request->director_title ?: 'Directeur';
+                $child->save();
+
+                // Rôles + postes par défaut, même mécanisme que côté SuperAdmin
+                app(EstablishmentRoleService::class)->createDefaultRolesFor($child);
+                app(EstablishmentPositionService::class)->createDefaultPositions($child);
+
+                // ── Réutilise le MÊME compte admin — jamais de duplication ──
+                $adminRole = Role::where('establishment_id', $child->id)->where('slug', 'admin')->first();
+                if ($adminRole) {
+                    $user->assignRole($adminRole);
+                }
+
+                // ── Année scolaire automatique, calquée sur celle du parent
+                // si aucune n'est précisée — sinon l'établissement enfant
+                // serait inutilisable dès sa création (aucune connexion
+                // standard possible sans année active). ──
+                $parentActiveYear = AcademicYears::withoutGlobalScopes()
+                    ->where('establishment_id', $home->id)
+                    ->where('is_active', true)
+                    ->first();
+
+                $year = AcademicYears::create([
+                    'establishment_id' => $child->id,
+                    'name'             => $request->year_name ?: ($parentActiveYear->name ?? (date('Y') . '-' . (date('Y') + 1))),
+                    'start_date'       => $request->year_start ?: ($parentActiveYear->start_date ?? now()->startOfYear()->toDateString()),
+                    'end_date'         => $request->year_end ?: ($parentActiveYear->end_date ?? now()->endOfYear()->toDateString()),
+                    'is_active'        => true,
+                    'is_archived'      => false,
+                ]);
+
+                return compact('child', 'year');
+            });
+
+            return response()->json([
+                'status'        => 'success',
+                'message'       => "Établissement affilié \"{$result['child']->name}\" créé avec succès. Vous pouvez y basculer via les onglets.",
+                'establishment' => $result['child'],
+                'year'          => $result['year'],
+            ], 201);
+
+        } catch (\Throwable $e) {
+            Log::error('Erreur createChildEstablishment : ' . $e->getMessage());
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Erreur lors de la création.',
+                'debug'   => config('app.debug') ? $e->getMessage() : null,
+            ], 500);
+        }
+    }
+}

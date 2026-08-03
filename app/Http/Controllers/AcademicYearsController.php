@@ -13,7 +13,11 @@ class AcademicYearsController extends Controller
 {
     public function index(Request $request)
     {
-        $academicData = AcademicYears::where('establishment_id', $request->user()->establishment_id)
+        // ─── CORRECTIF : current_establishment_id() (pas establishment_id brut)
+        // — sinon un admin ayant switché vers un établissement affilié verrait
+        // toujours les années de son établissement D'ORIGINE, jamais celles
+        // de l'établissement qu'il consulte réellement. ───
+        $academicData = AcademicYears::where('establishment_id', current_establishment_id())
             ->orderByDesc('is_active')
             ->orderByDesc('created_at')
             ->get();
@@ -28,18 +32,19 @@ class AcademicYearsController extends Controller
     {
         try {
             $user = Auth::user();
+            $establishmentId = current_establishment_id();
             $validated = $academicrequest->validated();
 
             $isActive = $validated['is_active'] ?? false;
 
             // Si la nouvelle année est active, on désactive les autres UNIQUEMENT dans cet établissement
             if ($isActive) {
-                AcademicYears::where('establishment_id', $user->establishment_id)
+                AcademicYears::where('establishment_id', $establishmentId)
                     ->update(['is_active' => false]);
             }
 
             $academicYear = AcademicYears::create([
-                'establishment_id' => $user->establishment_id,
+                'establishment_id' => $establishmentId,
                 'name'        => $validated['name'],
                 'start_date'  => $validated['start_date'],
                 'end_date'    => $validated['end_date'],
@@ -67,7 +72,7 @@ class AcademicYearsController extends Controller
     public function show(Request $request, string $id)
     {
         $donnees_academique = AcademicYears::where('id', $id)
-            ->where('establishment_id', $request->user()->establishment_id)
+            ->where('establishment_id', current_establishment_id())
             ->firstOrFail();
 
         return response()->json([
@@ -80,13 +85,14 @@ class AcademicYearsController extends Controller
     {
         try {
             $user = Auth::user();
+            $establishmentId = current_establishment_id();
 
             $academicYear = AcademicYears::where('id', $id)
-                ->where('establishment_id', $user->establishment_id)
+                ->where('establishment_id', $establishmentId)
                 ->firstOrFail();
 
             $validated = $request->validate([
-                'name'        => 'required|string|max:100|unique:academic_years,name,' . $id . ',id,establishment_id,' . $user->establishment_id,
+                'name'        => 'required|string|max:100|unique:academic_years,name,' . $id . ',id,establishment_id,' . $establishmentId,
                 'start_date'  => 'required|date',
                 'end_date'    => 'required|date|after:start_date',
                 'is_active'   => 'required|boolean',
@@ -94,7 +100,7 @@ class AcademicYearsController extends Controller
             ]);
 
             if ($validated['is_active']) {
-                AcademicYears::where('establishment_id', $user->establishment_id)
+                AcademicYears::where('establishment_id', $establishmentId)
                     ->where('id', '!=', $id)
                     ->update(['is_active' => false]);
             }
@@ -134,7 +140,7 @@ class AcademicYearsController extends Controller
     {
         try {
             $deleteYears = AcademicYears::where('id', $id)
-                ->where('establishment_id', $request->user()->establishment_id)
+                ->where('establishment_id', current_establishment_id())
                 ->firstOrFail();
 
             $deleteYears->delete();
@@ -155,7 +161,11 @@ class AcademicYearsController extends Controller
 
     public function getActiveYear(Request $request)
     {
-        $activeYear = AcademicYears::where('establishment_id', $request->user()->establishment_id)
+        // ─── LE VRAI CORRECTIF DE CETTE SESSION : c'est CETTE méthode
+        // précisément qui alimentait /academic-years/active, utilisée par
+        // le formulaire de création d'inscription — d'où le mauvais
+        // academic_year_id envoyé pour un établissement affilié. ───
+        $activeYear = AcademicYears::where('establishment_id', current_establishment_id())
             ->where('is_active', true)
             ->where('is_archived', false)
             ->first();
@@ -172,7 +182,7 @@ class AcademicYearsController extends Controller
 
     public function getNextYear(Request $request)
     {
-        $establishmentId = $request->user()->establishment_id;
+        $establishmentId = current_establishment_id();
 
         $nextYear = AcademicYears::where('establishment_id', $establishmentId)
             ->where('is_active', 0)
@@ -203,10 +213,10 @@ class AcademicYearsController extends Controller
     // ─────────────────────────────────────────────────────────────────
     public function activate(Request $request, string $id)
     {
-        $user = $request->user();
+        $establishmentId = current_establishment_id();
 
         $year = AcademicYears::where('id', $id)
-            ->where('establishment_id', $user->establishment_id)
+            ->where('establishment_id', $establishmentId)
             ->first();
 
         if (!$year) {
@@ -216,8 +226,8 @@ class AcademicYearsController extends Controller
             ], 404);
         }
 
-        DB::transaction(function () use ($year, $user) {
-            AcademicYears::where('establishment_id', $user->establishment_id)
+        DB::transaction(function () use ($year, $establishmentId) {
+            AcademicYears::where('establishment_id', $establishmentId)
                 ->where('id', '!=', $year->id)
                 ->update(['is_active' => false]);
 
