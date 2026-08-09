@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Academic\Classe;
 use App\Models\Academic\Student;
+use App\Models\Establishment;
 use App\Models\officeAdministration\Enrollment;
 use App\Models\officeAdministration\EnrollmentFinancial;
 use App\Models\User;
@@ -14,498 +15,197 @@ use Illuminate\Support\Facades\DB;
 
 class EnrollmentController extends Controller
 {
-    //
-
-//    public function store(Request $request)
-// {
-//     // 1. Validation stricte (Montants obligatoirement entiers positifs pour le FCFA) 
-//     $validated = $request->validate([
-//         'student_id'       => ['required', 'exists:students,id'],
-//         'class_id'         => ['required', 'exists:classes,id'],
-//         'academic_year_id' => ['required', 'exists:academic_years,id'],
-//         'type'             => ['required', 'in:new,re_enrollment'],
-//         'enrollment_date'  => ['required', 'date'],
-//         'notes'            => ['nullable', 'string'],
-        
-//         // Validation FCFA (entiers)
-//         'registration_fee' => ['required', 'integer', 'min:0'],
-//         'tuition_fee'      => ['required', 'integer', 'min:0'],
-//         'annex_fee'        => ['required', 'integer', 'min:0'],
-//         'discount_amount'  => ['required', 'integer', 'min:0'],
-//         'initial_payment'  => ['required', 'integer', 'min:0'],
-//         'payment_method'   => ['required', 'in:cash,online,none'],
-        
-//     ]);
-
-//     // 2. VERROU FINANCIER DE SÉCURITÉ : Bloquer la réinscription si scolarité non soldée
-//     $currentStudent = Student::with('latestEnrollment.financial')->findOrFail($request->student_id);
-
-//     if ($request->type === 're_enrollment' && $currentStudent->latestEnrollment) {
-//         $currentFinancial = $currentStudent->latestEnrollment->financial;
-//         if ($currentFinancial) {
-//             $resteA_Payer = (int) $currentFinancial->total_due - (int) $currentFinancial->initial_payment;
-//             if ($resteA_Payer > 0) {
-//                 return response()->json([
-//                     'status'  => 'error',
-//                     'message' => "Interdit : Cet élève traîne une dette de " . number_format($resteA_Payer, 0, '', ' ') . " FCFA sur l'année en cours. Veuillez régulariser sa situation à la caisse."
-//                 ], 422);
-//             }
-//         }
-//     }
-
-//     // 3. Sécurité : Empêcher le doublon d'inscription pour la même année scolaire destination
-//     $exists = Enrollment::where('student_id', $request->student_id)
-//         ->where('academic_year_id', $request->academic_year_id)
-//         ->exists();
-
-//     if ($exists) {
-//         return response()->json([
-//             'status'  => 'error',
-//             'message' => "Cet élève dispose déjà d'un dossier d'inscription actif pour cette année académique."
-//         ], 422);
-//     }
-
-//     $userId = Auth::id(); 
-
-//     // 4. Traitement sécurisé dans une transaction de base de données
-//     return DB::transaction(function () use ($validated, $userId) {
-        
-//         // Génération dynamique du numéro unique : INS-ANNEE-COMPTEUR
-//         $currentYear = date('Y');
-//         $lastEnrollment = Enrollment::whereRaw("enrollment_number LIKE 'INS-{$currentYear}-%'")
-//             ->latest('id')
-//             ->first();
-
-//         if ($lastEnrollment) {
-//             // Extrait les 5 derniers caractères numériques et ajoute 1
-//             $lastNumber = (int) substr($lastEnrollment->enrollment_number, -5);
-//             $nextNumber = $lastNumber + 1;
-//         } else {
-//             $nextNumber = 1;
-//         }
-
-//         $enrollmentNumber = 'INS-' . $currentYear . '-' . str_pad($nextNumber, 5, '0', STR_PAD_LEFT);
-
-//         // Création de la fiche d'inscription principale
-//         $enrollment = Enrollment::create([
-//             'student_id'        => $validated['student_id'],
-//             'class_id'          => $validated['class_id'],
-//             'academic_year_id'  => $validated['academic_year_id'],
-//             'enrollment_number' => $enrollmentNumber,
-//             'type'              => $validated['type'],
-//             'enrollment_date'   => $validated['enrollment_date'],
-//             'notes'             => $validated['notes'] ?? null,
-//             'created_by' => $userId, 
-           
-//         ]);
-
-//         // Calcul du net à payer en FCFA
-//         $subtotal = $validated['registration_fee'] + $validated['tuition_fee'] + $validated['annex_fee'];
-//         $totalDue = $subtotal - $validated['discount_amount'];
-//         if ($totalDue < 0) $totalDue = 0;
-
-//         // Création du volet financier lié
-//         EnrollmentFinancial::create([
-//             'enrollment_id'    => $enrollment->id,
-//             'registration_fee' => $validated['registration_fee'],
-//             'tuition_fee'      => $validated['tuition_fee'],
-//             'annex_fee'        => $validated['annex_fee'],
-//             'discount_amount'  => $validated['discount_amount'],
-//             'total_due'        => $totalDue,
-//             'initial_payment'  => $validated['initial_payment'],
-//             'payment_method'   => $validated['payment_method'],
-//         ]);
-
-//         // Synchronisation de la classe actuelle sur le dossier permanent de l'élève
-//         $student = Student::find($validated['student_id']);
-//         $student->update([
-//             'class_id'         => $validated['class_id'],
-//             'academic_year_id' => $validated['academic_year_id'],
-//         ]);
-
-//         return response()->json([
-//             'status'            => 'success',
-//             'message'           => "Inscription validée avec succès sous le numéro {$enrollmentNumber}.",
-//             'enrollment_number' => $enrollmentNumber
-//         ], 201);
-//     });
-// }
-
-
-
-
-
-
-//     public function store(Request $request)
-// {
-//     assert_writable_year();
-
-//     // 1. Validation stricte (Montants obligatoirement entiers positifs pour le FCFA)
-//     $validated = $request->validate([
-//         'student_id'       => ['required', 'exists:students,id'],
-//         'class_id'         => ['required', 'exists:classes,id'],
-//         'academic_year_id' => ['required', 'exists:academic_years,id'],
-//         'type'             => ['required', 'in:new,re_enrollment'],
-//         'enrollment_date'  => ['required', 'date'],
-//         'notes'            => ['nullable', 'string'],
-
-//         'registration_fee' => ['required', 'integer', 'min:0'],
-//         'tuition_fee'      => ['required', 'integer', 'min:0'],
-//         'annex_fee'        => ['required', 'integer', 'min:0'],
-//         'discount_amount'  => ['required', 'integer', 'min:0'],
-//         'initial_payment'  => ['required', 'integer', 'min:0'],
-//         'payment_method'   => ['required', 'in:cash,online,none'],
-//     ]);
-
-//     // Vérifier que l'année ET la classe appartiennent bien à l'établissement du user
-//     $yearOwned = \App\Models\Academic\AcademicYears::where('id', $validated['academic_year_id'])
-//         ->where('establishment_id', current_establishment_id())
-//         ->exists();
-
-//     if (!$yearOwned) {
-//         return response()->json([
-//             'status'  => 'error',
-//             'message' => "Année scolaire invalide pour votre établissement."
-//         ], 422);
-//     }
-
-//     // ─── VERROU : la classe doit appartenir à l'année scolaire soumise ───
-//     $classe = Classe::findOrFail($validated['class_id']);
-//     if ($classe->academic_year_id != $validated['academic_year_id']) {
-//         return response()->json([
-//             'status'  => 'error',
-//             'message' => "Cette classe n'appartient pas à l'année scolaire sélectionnée."
-//         ], 422);
-//     }
-
-//     $currentStudent = Student::with('classe')->findOrFail($validated['student_id']);
-
-//     // ─── SÉCURITÉ : on prend le DERNIER DFA connu de l'élève, peu importe
-//     // l'année active du moment. Un "E" enregistré sur 2025-2026 continue de
-//     // bloquer même après activation de 2026-2027, tant qu'aucun nouveau DFA
-//     // (différent) n'a été enregistré depuis.
-//     $lastDecision = \App\Models\Academic\StudentAcademicRecord::where('student_id', $currentStudent->id)
-//         ->orderByDesc('academic_year_id')
-//         ->value('year_end_decision');
-
-//     if ($lastDecision === 'E') {
-//         return response()->json([
-//             'status'  => 'error',
-//             'message' => "Cet élève a été exclu et ne peut plus être inscrit ni réinscrit."
-//         ], 422);
-//     }
-
-//     // ─── Reliquat : requête DIRECTE sur Enrollment ET sur EnrollmentFinancial,
-//     // sans passer par les relations Eloquent, dont les scopes internes réappliquent
-//     // silencieusement le filtre d'année consultée.
-//     $previousBalance = 0;
-
-//     if ($validated['type'] === 're_enrollment') {
-//         $lastEnrollment = Enrollment::withoutGlobalScope('viewingYear')
-//             ->where('student_id', $currentStudent->id)
-//             ->orderByDesc('academic_year_id')
-//             ->orderByDesc('id')
-//             ->first();
-
-//         if ($lastEnrollment) {
-//             $financial = \App\Models\officeAdministration\EnrollmentFinancial::withoutGlobalScopes()
-//                 ->where('enrollment_id', $lastEnrollment->id)
-//                 ->first();
-
-//             if ($financial) {
-//                 $previousBalance = max(0, (int) $financial->total_due - (int) $financial->initial_payment);
-//             }
-//         }
-
-//         // ─── VERROU : un redoublant (dernier DFA = "R") ne peut être réinscrit
-//         // que dans une classe du MÊME niveau que sa classe actuelle.
-//         if ($lastDecision === 'R') {
-//             $currentLevelId = $currentStudent->classe?->level_id;
-//             $targetLevelId  = $classe->level_id ?? null;
-
-//             if (!$currentLevelId || $targetLevelId != $currentLevelId) {
-//                 return response()->json([
-//                     'status'  => 'error',
-//                     'message' => "Cet élève redouble : il ne peut être réinscrit que dans une classe du même niveau que sa classe actuelle."
-//                 ], 422);
-//             }
-//         }
-//     }
-
-//     // 3. Sécurité : Empêcher le doublon d'inscription pour la même année scolaire destination
-//     $exists = Enrollment::where('student_id', $validated['student_id'])
-//         ->where('academic_year_id', $validated['academic_year_id'])
-//         ->exists();
-
-//     if ($exists) {
-//         return response()->json([
-//             'status'  => 'error',
-//             'message' => "Cet élève dispose déjà d'un dossier d'inscription actif pour cette année académique."
-//         ], 422);
-//     }
-
-//     // ─── VERROU DE SÉCURITÉ : CAPACITÉ MAXIMALE DE LA CLASSE ───
-//     $maxCapacity = (int) $classe->capacity;
-
-//     $currentCount = Student::where('class_id', $validated['class_id'])
-//         ->where('academic_year_id', $validated['academic_year_id'])
-//         ->where('id', '!=', $validated['student_id'])
-//         ->count();
-
-//     if ($currentCount >= $maxCapacity) {
-//         return response()->json([
-//             'status'  => 'error',
-//             'message' => "Surcharge refusée : La classe '{$classe->name}' a atteint sa capacité limite autorisée de {$maxCapacity} places pour cette année académique."
-//         ], 422);
-//     }
-
-//     $userId = Auth::id();
-
-//     // 4. Traitement sécurisé dans une transaction de base de données
-//     return DB::transaction(function () use ($validated, $userId, $previousBalance) {
-
-//         $estabPrefix = current_establishment_prefix();
-//         $yearShort   = current_school_year_short();
-//         $insPrefix   = "INS-{$estabPrefix}-{$yearShort}-";
-
-//         $lastEnrollment = Enrollment::where('enrollment_number', 'LIKE', $insPrefix . '%')
-//             ->latest('id')
-//             ->first();
-
-//         if ($lastEnrollment) {
-//             $lastNumber = (int) substr($lastEnrollment->enrollment_number, -5);
-//             $nextNumber = $lastNumber + 1;
-//         } else {
-//             $nextNumber = 1;
-//         }
-
-//         $enrollmentNumber = $insPrefix . str_pad($nextNumber, 5, '0', STR_PAD_LEFT);
-
-//         $enrollment = Enrollment::create([
-//             'student_id'        => $validated['student_id'],
-//             'class_id'          => $validated['class_id'],
-//             'academic_year_id'  => $validated['academic_year_id'],
-//             'enrollment_number' => $enrollmentNumber,
-//             'type'              => $validated['type'],
-//             'enrollment_date'   => $validated['enrollment_date'],
-//             'notes'             => $validated['notes'] ?? null,
-//             'created_by'        => $userId,
-//         ]);
-
-//         $subtotal = $validated['registration_fee'] + $validated['tuition_fee'] + $validated['annex_fee'];
-//         $totalDue = $subtotal + $previousBalance - $validated['discount_amount'];
-//         if ($totalDue < 0) $totalDue = 0;
-
-//         EnrollmentFinancial::create([
-//             'enrollment_id'    => $enrollment->id,
-//             'registration_fee' => $validated['registration_fee'],
-//             'tuition_fee'      => $validated['tuition_fee'],
-//             'annex_fee'        => $validated['annex_fee'],
-//             'discount_amount'  => $validated['discount_amount'],
-//             'previous_balance' => $previousBalance,
-//             'total_due'        => $totalDue,
-//             'initial_payment'  => $validated['initial_payment'],
-//             'payment_method'   => $validated['payment_method'],
-//         ]);
-
-//         $student = Student::find($validated['student_id']);
-//         $student->update([
-//             'class_id'         => $validated['class_id'],
-//             'academic_year_id' => $validated['academic_year_id'],
-//         ]);
-
-//         return response()->json([
-//             'status'            => 'success',
-//             'message'           => "Inscription validée avec succès sous le numéro {$enrollmentNumber}.",
-//             'enrollment_number' => $enrollmentNumber
-//         ], 201);
-//     });
-// }
-
     public function store(Request $request)
-{
-    assert_writable_year();
+    {
+        assert_writable_year();
 
-    $validated = $request->validate([
-        'student_id'       => ['required', 'exists:students,id'],
-        'class_id'         => ['required', 'exists:classes,id'],
-        'academic_year_id' => ['required', 'exists:academic_years,id'],
-        'type'             => ['required', 'in:new,re_enrollment'],
-        'enrollment_date'  => ['required', 'date'],
-        'notes'            => ['nullable', 'string'],
+        $validated = $request->validate([
+            'student_id'       => ['required', 'exists:students,id'],
+            'class_id'         => ['required', 'exists:classes,id'],
+            'academic_year_id' => ['required', 'exists:academic_years,id'],
+            'type'             => ['required', 'in:new,re_enrollment'],
+            'enrollment_date'  => ['required', 'date'],
+            'notes'            => ['nullable', 'string'],
 
-        'registration_fee' => ['required', 'integer', 'min:0'],
-        'tuition_fee'      => ['required', 'integer', 'min:0'],
-        'annex_fee'        => ['required', 'integer', 'min:0'],
-        'discount_amount'  => ['required', 'integer', 'min:0'],
-        'initial_payment'  => ['required', 'integer', 'min:0'],
-        'payment_method'   => ['required', 'in:cash,online,none'],
-    ]);
+            'registration_fee' => ['required', 'integer', 'min:0'],
+            'tuition_fee'      => ['required', 'integer', 'min:0'],
+            'annex_fee'        => ['required', 'integer', 'min:0'],
+            'discount_amount'  => ['nullable', 'integer', 'min:0'],
+            'initial_payment'  => ['required', 'integer', 'min:0'],
+            'payment_method'   => ['required', 'in:cash,online,none'],
+        ]);
 
-    $yearOwned = \App\Models\Academic\AcademicYears::where('id', $validated['academic_year_id'])
-        ->where('establishment_id', current_establishment_id())
-        ->exists();
+        $yearOwned = \App\Models\Academic\AcademicYears::where('id', $validated['academic_year_id'])
+            ->where('establishment_id', current_establishment_id())
+            ->exists();
 
-    if (!$yearOwned) {
-        return response()->json([
-            'status'  => 'error',
-            'message' => "Année scolaire invalide pour votre établissement."
-        ], 422);
-    }
+        if (!$yearOwned) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Année scolaire invalide pour votre établissement."
+            ], 422);
+        }
 
-    $classe = Classe::findOrFail($validated['class_id']);
-    if ($classe->academic_year_id != $validated['academic_year_id']) {
-        return response()->json([
-            'status'  => 'error',
-            'message' => "Cette classe n'appartient pas à l'année scolaire sélectionnée."
-        ], 422);
-    }
+        $classe = Classe::findOrFail($validated['class_id']);
+        if ($classe->academic_year_id != $validated['academic_year_id']) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cette classe n'appartient pas à l'année scolaire sélectionnée."
+            ], 422);
+        }
 
-    $currentStudent = Student::with('classe')->findOrFail($validated['student_id']);
+        $currentStudent = Student::with('classe')->findOrFail($validated['student_id']);
 
-    // ─── SÉCURITÉ : dernier DFA connu de l'élève, scope 'viewingYear' de
-    // StudentAcademicRecord contourné explicitement pour ne pas le perdre
-    // de vue après un changement d'année active.
-    $lastDecision = \App\Models\Academic\StudentAcademicRecord::withoutGlobalScope('viewingYear')
-        ->where('student_id', $currentStudent->id)
-        ->orderByDesc('academic_year_id')
-        ->value('year_end_decision');
-
-    if ($lastDecision === 'E') {
-        return response()->json([
-            'status'  => 'error',
-            'message' => "Cet élève a été exclu et ne peut plus être inscrit ni réinscrit."
-        ], 422);
-    }
-
-    $previousBalance = 0;
-
-    if ($validated['type'] === 're_enrollment') {
-        $lastEnrollment = Enrollment::withoutGlobalScope('viewingYear')
+        $lastDecision = \App\Models\Academic\StudentAcademicRecord::withoutGlobalScope('viewingYear')
             ->where('student_id', $currentStudent->id)
             ->orderByDesc('academic_year_id')
-            ->orderByDesc('id')
-            ->first();
+            ->value('year_end_decision');
 
-        if ($lastEnrollment) {
-            $financial = \App\Models\officeAdministration\EnrollmentFinancial::withoutGlobalScopes()
-                ->where('enrollment_id', $lastEnrollment->id)
+        if ($lastDecision === 'E') {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cet élève a été exclu et ne peut plus être inscrit ni réinscrit."
+            ], 422);
+        }
+
+        $previousBalance = 0;
+
+        if ($validated['type'] === 're_enrollment') {
+            $lastEnrollment = Enrollment::withoutGlobalScope('viewingYear')
+                ->where('student_id', $currentStudent->id)
+                ->where('status', '!=', 'cancelled')
+                ->orderByDesc('academic_year_id')
+                ->orderByDesc('id')
                 ->first();
 
-            if ($financial) {
-                $previousBalance = max(0, (int) $financial->total_due - (int) $financial->initial_payment);
+            if ($lastEnrollment) {
+                $financial = \App\Models\officeAdministration\EnrollmentFinancial::withoutGlobalScopes()
+                    ->where('enrollment_id', $lastEnrollment->id)
+                    ->first();
+
+                if ($financial) {
+                    $previousBalance = max(0, (int) $financial->total_due - (int) $financial->initial_payment);
+                }
+            }
+
+            if ($lastDecision === 'R') {
+                $currentLevelId = $currentStudent->classe?->level_id;
+                $targetLevelId  = $classe->level_id ?? null;
+
+                if (!$currentLevelId || $targetLevelId != $currentLevelId) {
+                    return response()->json([
+                        'status'  => 'error',
+                        'message' => "Cet élève redouble : il ne peut être réinscrit que dans une classe du même niveau que sa classe actuelle."
+                    ], 422);
+                }
             }
         }
 
-        if ($lastDecision === 'R') {
-            $currentLevelId = $currentStudent->classe?->level_id;
-            $targetLevelId  = $classe->level_id ?? null;
+        // ─── CORRECTIF : une inscription ANNULÉE ne doit plus jamais
+        // bloquer une nouvelle tentative pour ce même élève/année — sinon
+        // une erreur de saisie annulée condamnerait définitivement l'élève
+        // à ne plus jamais pouvoir être inscrit cette année-là. On garde
+        // volontairement la ligne annulée en base (traçabilité/historique,
+        // conforme au principe "aucun delete définitif" de ce projet) —
+        // elle est juste exclue de cette vérification précise. ───
+        $exists = Enrollment::where('student_id', $validated['student_id'])
+            ->where('academic_year_id', $validated['academic_year_id'])
+            ->where('status', '!=', 'cancelled')
+            ->exists();
 
-            if (!$currentLevelId || $targetLevelId != $currentLevelId) {
-                return response()->json([
-                    'status'  => 'error',
-                    'message' => "Cet élève redouble : il ne peut être réinscrit que dans une classe du même niveau que sa classe actuelle."
-                ], 422);
+        if ($exists) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cet élève dispose déjà d'un dossier d'inscription actif pour cette année académique."
+            ], 422);
+        }
+
+        $maxCapacity = (int) $classe->capacity;
+
+        $currentCount = Student::where('class_id', $validated['class_id'])
+            ->where('academic_year_id', $validated['academic_year_id'])
+            ->where('id', '!=', $validated['student_id'])
+            ->count();
+
+        if ($currentCount >= $maxCapacity) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Surcharge refusée : La classe '{$classe->name}' a atteint sa capacité limite autorisée de {$maxCapacity} places pour cette année académique."
+            ], 422);
+        }
+
+        $userId = Auth::id();
+
+        return DB::transaction(function () use ($validated, $userId, $previousBalance) {
+
+            $estabPrefix = current_establishment_prefix();
+            $yearShort   = current_school_year_short();
+            $insPrefix   = "INS-{$estabPrefix}-{$yearShort}-";
+
+            $lastEnrollment = Enrollment::where('enrollment_number', 'LIKE', $insPrefix . '%')
+                ->latest('id')
+                ->first();
+
+            if ($lastEnrollment) {
+                $lastNumber = (int) substr($lastEnrollment->enrollment_number, -5);
+                $nextNumber = $lastNumber + 1;
+            } else {
+                $nextNumber = 1;
             }
-        }
+
+            $enrollmentNumber = $insPrefix . str_pad($nextNumber, 5, '0', STR_PAD_LEFT);
+
+            $enrollment = Enrollment::create([
+                'student_id'        => $validated['student_id'],
+                'class_id'          => $validated['class_id'],
+                'academic_year_id'  => $validated['academic_year_id'],
+                'enrollment_number' => $enrollmentNumber,
+                'type'              => $validated['type'],
+                'enrollment_date'   => $validated['enrollment_date'],
+                'notes'             => $validated['notes'] ?? null,
+                'created_by'        => $userId,
+            ]);
+
+            $discountAmount = $validated['discount_amount'] ?? 0;
+            $subtotal = $validated['registration_fee'] + $validated['tuition_fee'] + $validated['annex_fee'];
+            $totalDue = $subtotal + $previousBalance - $discountAmount;
+            if ($totalDue < 0) $totalDue = 0;
+
+            EnrollmentFinancial::create([
+                'enrollment_id'    => $enrollment->id,
+                'registration_fee' => $validated['registration_fee'],
+                'tuition_fee'      => $validated['tuition_fee'],
+                'annex_fee'        => $validated['annex_fee'],
+                'discount_amount'  => $discountAmount,
+                'previous_balance' => $previousBalance,
+                'total_due'        => $totalDue,
+                'initial_payment'  => $validated['initial_payment'],
+                'payment_method'   => $validated['payment_method'],
+            ]);
+
+            $student = Student::find($validated['student_id']);
+            $student->update([
+                'class_id'         => $validated['class_id'],
+                'academic_year_id' => $validated['academic_year_id'],
+            ]);
+
+            return response()->json([
+                'status'            => 'success',
+                'message'           => "Inscription validée avec succès sous le numéro {$enrollmentNumber}.",
+                'enrollment_number' => $enrollmentNumber,
+                'id'                => $enrollment->id,
+            ], 201);
+        });
     }
 
-    $exists = Enrollment::where('student_id', $validated['student_id'])
-        ->where('academic_year_id', $validated['academic_year_id'])
-        ->exists();
-
-    if ($exists) {
-        return response()->json([
-            'status'  => 'error',
-            'message' => "Cet élève dispose déjà d'un dossier d'inscription actif pour cette année académique."
-        ], 422);
-    }
-
-    $maxCapacity = (int) $classe->capacity;
-
-    $currentCount = Student::where('class_id', $validated['class_id'])
-        ->where('academic_year_id', $validated['academic_year_id'])
-        ->where('id', '!=', $validated['student_id'])
-        ->count();
-
-    if ($currentCount >= $maxCapacity) {
-        return response()->json([
-            'status'  => 'error',
-            'message' => "Surcharge refusée : La classe '{$classe->name}' a atteint sa capacité limite autorisée de {$maxCapacity} places pour cette année académique."
-        ], 422);
-    }
-
-    $userId = Auth::id();
-
-    return DB::transaction(function () use ($validated, $userId, $previousBalance) {
-
-        $estabPrefix = current_establishment_prefix();
-        $yearShort   = current_school_year_short();
-        $insPrefix   = "INS-{$estabPrefix}-{$yearShort}-";
-
-        $lastEnrollment = Enrollment::where('enrollment_number', 'LIKE', $insPrefix . '%')
-            ->latest('id')
-            ->first();
-
-        if ($lastEnrollment) {
-            $lastNumber = (int) substr($lastEnrollment->enrollment_number, -5);
-            $nextNumber = $lastNumber + 1;
-        } else {
-            $nextNumber = 1;
-        }
-
-        $enrollmentNumber = $insPrefix . str_pad($nextNumber, 5, '0', STR_PAD_LEFT);
-
-        $enrollment = Enrollment::create([
-            'student_id'        => $validated['student_id'],
-            'class_id'          => $validated['class_id'],
-            'academic_year_id'  => $validated['academic_year_id'],
-            'enrollment_number' => $enrollmentNumber,
-            'type'              => $validated['type'],
-            'enrollment_date'   => $validated['enrollment_date'],
-            'notes'             => $validated['notes'] ?? null,
-            'created_by'        => $userId,
-        ]);
-
-        $subtotal = $validated['registration_fee'] + $validated['tuition_fee'] + $validated['annex_fee'];
-        $totalDue = $subtotal + $previousBalance - $validated['discount_amount'];
-        if ($totalDue < 0) $totalDue = 0;
-
-        EnrollmentFinancial::create([
-            'enrollment_id'    => $enrollment->id,
-            'registration_fee' => $validated['registration_fee'],
-            'tuition_fee'      => $validated['tuition_fee'],
-            'annex_fee'        => $validated['annex_fee'],
-            'discount_amount'  => $validated['discount_amount'],
-            'previous_balance' => $previousBalance,
-            'total_due'        => $totalDue,
-            'initial_payment'  => $validated['initial_payment'],
-            'payment_method'   => $validated['payment_method'],
-        ]);
-
-        $student = Student::find($validated['student_id']);
-        $student->update([
-            'class_id'         => $validated['class_id'],
-            'academic_year_id' => $validated['academic_year_id'],
-        ]);
-
-        return response()->json([
-            'status'            => 'success',
-            'message'           => "Inscription validée avec succès sous le numéro {$enrollmentNumber}.",
-            'enrollment_number' => $enrollmentNumber
-        ], 201);
-    });
-}
-
-        public function index()
+    public function index()
     {
         $enrollments = Enrollment::with([
-            'student', 
-            'classe.level', 
+            'student',
+            'classe.level',
             'academicYear'
         ])->latest()->get();
 
-        // Reformatage léger des clés pour s'imbriquer sans toucher à votre structure JSX
         $formatted = $enrollments->map(function ($enr) {
             return [
                 'id'                => $enr->id,
@@ -530,67 +230,92 @@ class EnrollmentController extends Controller
         return response()->json($formatted, 200);
     }
 
-    /**
-     * Valide administrativement l'inscription.
-     */
-   public function validateEnrollment(string $id)
-{   
-    assert_writable_year();
-    try {
-        $enrollment = Enrollment::findOrFail($id);
+    public function validateEnrollment(string $id)
+    {
+        assert_writable_year();
+        try {
+            $enrollment = Enrollment::findOrFail($id);
 
-        $enrollment->update([
-            'status'       => 'validated',
-            'validated_by' => Auth::id(),
-            'validated_at' => now(),
-        ]);
+            $enrollment->update([
+                'status'       => 'validated',
+                'validated_by' => Auth::id(),
+                'validated_at' => now(),
+            ]);
 
-        // ✅ On récupère l'élève via la clé student_id de l'inscription (pas via $id)
-        $student = Student::findOrFail($enrollment->student_id);
-        $student->update([
-            'is_enrolled' => 1, // l'inscription vient d'être validée
-        ]);
+            $student = Student::findOrFail($enrollment->student_id);
+            $student->update([
+                'is_enrolled' => 1,
+            ]);
 
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'Inscription validée.'
-        ], 200);
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Inscription validée.'
+            ], 200);
 
-    } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
-        return response()->json(['status' => 'error', 'message' => 'Inscription introuvable.'], 404);
-    } catch (\Exception $e) {
-        return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json(['status' => 'error', 'message' => 'Inscription introuvable.'], 404);
+        } catch (\Exception $e) {
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 500);
+        }
     }
-}
 
-    /**
-     * Annule une inscription.
-     */
     public function cancelEnrollment(string $id)
     {
         assert_writable_year();
         $enrollment = Enrollment::findOrFail($id);
-        $enrollment->update(['status' => 'cancelled']);
 
-        return response()->json(['status' => 'success', 'message' => 'Inscription annulée.']);
+        return DB::transaction(function () use ($enrollment) {
+            $enrollment->update(['status' => 'cancelled']);
+
+            // ─── CORRECTIF CENTRAL : le compteur de places d'une classe se
+            // base sur students.class_id (pas sur le statut de l'inscription).
+            // Annuler l'inscription SANS libérer ce champ laissait l'élève
+            // "compté" comme occupant toujours une place, même annulé —
+            // faussant la capacité affichée au moment de choisir la classe
+            // de destination pour une nouvelle inscription. ───
+            $student = Student::find($enrollment->student_id);
+
+            if ($student
+                && (int) $student->class_id === (int) $enrollment->class_id
+                && (int) $student->academic_year_id === (int) $enrollment->academic_year_id
+            ) {
+                // Cherche s'il existe une AUTRE inscription active (non
+                // annulée) pour ce même élève sur cette même année — cas
+                // normalement impossible vu la contrainte anti-doublon,
+                // mais on vérifie par sécurité avant de vider le champ.
+                $stillActiveElsewhere = Enrollment::withoutGlobalScope('viewingYear')
+                    ->where('student_id', $student->id)
+                    ->where('academic_year_id', $enrollment->academic_year_id)
+                    ->where('status', '!=', 'cancelled')
+                    ->exists();
+
+                if (!$stillActiveElsewhere) {
+                    $student->update([
+                        'class_id'         => null,
+                        'academic_year_id' => null,
+                        'is_enrolled'      => false,
+                    ]);
+                }
+            }
+
+            return response()->json(['status' => 'success', 'message' => 'Inscription annulée. La place a été libérée dans la classe.']);
+        });
     }
 
-        public function show(string $id)
+    public function show(string $id)
     {
         try {
-            // Chargement imbriqué de toutes les relations du modèle Enrollment
             $enrollment = Enrollment::with([
-                'student', 
-                'classe.level', 
-                'academicYear', 
+                'student',
+                'classe.level',
+                'academicYear',
                 'financial',
                 'validator'
             ])->findOrFail($id);
-             // Récupération manuelle du créateur si la relation n'est pas encore déclarée dans le modèle
-        $creatorUser = User::find($enrollment->created_by);
-        $validatorUser = $enrollment->validator ?? User::find($enrollment->validated_by);
 
-            // Transformation des données pour coller à la structure d'objet de l'interface React , faut pas que j'oublie un point cle !
+            $creatorUser = User::find($enrollment->created_by);
+            $validatorUser = $enrollment->validator ?? User::find($enrollment->validated_by);
+
             $formatted = [
                 'id'                => $enrollment->id,
                 'enrollment_number' => $enrollment->enrollment_number,
@@ -600,42 +325,37 @@ class EnrollmentController extends Controller
                 'notes'             => $enrollment->notes,
                 'created_at'        => Carbon::parse($enrollment->created_at)->toISOString(),
                 'validated_at'      => $enrollment->validated_at ? Carbon::parse($enrollment->validated_at)->toISOString() : null,
-                   // --- AJOUT DE LA TRAÇABILITÉ DES AGENTS ---
                 'created_by' => $creatorUser ? [
                     'id'   => $creatorUser->id,
-                    'name' => $creatorUser->name, // Retournera 'Stephane'
+                    'name' => $creatorUser->name,
                 ] : null,
-                
                 'validated_by' => $validatorUser ? [
                     'id'   => $validatorUser->id,
                     'name' => $validatorUser->name,
                 ] : null,
-                
                 'student' => $enrollment->student ? [
                     'id'          => $enrollment->student->id,
                     'matricule'   => $enrollment->student->matricule,
                     'first_name'  => $enrollment->student->first_name,
                     'last_name'   => $enrollment->student->last_name,
                     'gender'      => $enrollment->student->gender,
-                    'photo'       => $enrollment->student->photo, // ← AJOUT : manquait, d'où la photo absente sur la fiche
+                    'photo'       => $enrollment->student->photo,
                     'birth_date'  => $enrollment->student->birth_date ? $enrollment->student->birth_date->format('Y-m-d') : null,
                     'birth_place' => $enrollment->student->birth_place,
                     'phone'       => $enrollment->student->phone,
                     'email'       => $enrollment->student->email,
                     'address'     => $enrollment->student->address,
+                    'religion'    => $enrollment->student->religion,
+                    'handicap'    => $enrollment->student->handicap,
                 ] : null,
-                
                 'classe' => $enrollment->classe ? [
                     'name'  => $enrollment->classe->name,
                     'level' => $enrollment->classe->level ? $enrollment->classe->level->name : 'N/A',
                     'cycle' => ($enrollment->classe && $enrollment->classe->level) ? $enrollment->classe->level->name : 'N/A',
                 ] : null,
-                
                 'academic_year' => [
                     'name' => $enrollment->academicYear ? $enrollment->academicYear->name : 'N/A'
                 ],
-                
-                // Les données financières en FCFA
                 'financial' => $enrollment->financial ? [
                     'registration_fee' => (int) $enrollment->financial->registration_fee,
                     'tuition_fee'      => (int) $enrollment->financial->tuition_fee,
@@ -667,46 +387,7 @@ class EnrollmentController extends Controller
         }
     }
 
-
-    /**
- * Calcule le reliquat (dette non soldée) de la dernière inscription d'un élève.
- * Appelé par le frontend dès qu'un élève est sélectionné en réinscription.
- */
-  
-
-    //     public function getStudentBalance(string $studentId)
-    // {
-    //     $student = Student::find($studentId);
-
-    //     if (!$student) {
-    //         return response()->json([
-    //             'status'  => 'error',
-    //             'message' => "Élève introuvable."
-    //         ], 404);
-    //     }
-
-    //     $lastEnrollment = \App\Models\officeAdministration\Enrollment::withoutGlobalScope('viewingYear')
-    //         ->where('student_id', $student->id)
-    //         ->with(['financial', 'academicYear'])
-    //         ->orderByDesc('academic_year_id')
-    //         ->orderByDesc('id')
-    //         ->first();
-
-    //     $financial = $lastEnrollment ? $lastEnrollment->financial : null;
-
-    //     $previousBalance = 0;
-    //     if ($financial) {
-    //         $previousBalance = max(0, (int) $financial->total_due - (int) $financial->initial_payment);
-    //     }
-
-    //     return response()->json([
-    //         'status'            => 'success',
-    //         'previous_balance'  => $previousBalance,
-    //         'previous_year'     => $lastEnrollment?->academicYear?->name,
-    //     ]);
-    // }
-
-     public function getStudentBalance(string $studentId)
+    public function getStudentBalance(string $studentId)
     {
         $student = Student::find($studentId);
 
@@ -719,6 +400,7 @@ class EnrollmentController extends Controller
 
         $lastEnrollment = Enrollment::withoutGlobalScope('viewingYear')
             ->where('student_id', $student->id)
+            ->where('status', '!=', 'cancelled')
             ->with('academicYear')
             ->orderByDesc('academic_year_id')
             ->orderByDesc('id')
@@ -741,5 +423,186 @@ class EnrollmentController extends Controller
             'previous_balance'  => $previousBalance,
             'previous_year'     => $lastEnrollment?->academicYear?->name,
         ]);
+    }
+
+    /**
+     * Génère le reçu d'inscription imprimable — en HTML brut, appelé par le
+     * frontend via un fetch() authentifié CLASSIQUE (en-tête Authorization
+     * normal, comme n'importe quel autre appel API de l'application) — le
+     * HTML renvoyé est ensuite injecté côté React dans un onglet déjà
+     * ouvert, plutôt que de naviguer directement vers cette URL. Reste donc
+     * protégée par le middleware auth:sanctum standard, sans contournement.
+     *
+     * Affiche systématiquement l'identité de l'établissement RÉELLEMENT
+     * actif au moment de l'inscription (current_establishment_id()) — que
+     * ce soit un établissement simple ou un établissement affilié d'un
+     * groupe scolaire, le nom/logo/signature correspondent toujours à
+     * l'établissement précis concerné, jamais à un "nom générique".
+     *
+     * URL : GET /enrollments/{id}/receipt
+     */
+    public function receiptPrint(string $id)
+    {
+        try {
+            $enrollment = Enrollment::with(['student', 'classe.level', 'academicYear', 'financial'])
+                ->findOrFail($id);
+
+            $establishment = Establishment::find(current_establishment_id());
+            $student = $enrollment->student;
+            $financial = $enrollment->financial;
+
+            $logoUrl = null;
+            if ($establishment && $establishment->logo) {
+                $logoUrl = str_starts_with($establishment->logo, 'http')
+                    ? $establishment->logo
+                    : url($establishment->logo);
+            }
+
+            // ─── AJOUT : photo de l'élève, même principe que le logo ───
+            $studentPhotoUrl = null;
+            if ($student && $student->photo) {
+                $studentPhotoUrl = str_starts_with($student->photo, 'http')
+                    ? $student->photo
+                    : url($student->photo);
+            }
+            $studentInitials = strtoupper(
+                mb_substr($student->first_name ?? '', 0, 1) . mb_substr($student->last_name ?? '', 0, 1)
+            ) ?: '?';
+
+            $totalDue       = $financial ? (int) $financial->total_due : 0;
+            $initialPayment = $financial ? (int) $financial->initial_payment : 0;
+            $remaining      = max(0, $totalDue - $initialPayment);
+
+            $dateEmission = Carbon::parse($enrollment->enrollment_date ?? now())->format('d/m/Y');
+            $directorTitle = $establishment->director_title ?? 'Directeur';
+            $directorName  = $establishment->director_name ?? '';
+
+            $methods = [
+                'cash'   => 'Espèces / Caisse',
+                'online' => 'Paiement en ligne / Mobile Money',
+                'none'   => 'Aucun versement',
+            ];
+            $moyenPaiement = $methods[$financial?->payment_method] ?? '—';
+
+            return "
+            <!DOCTYPE html>
+            <html lang='fr'>
+            <head>
+                <meta charset='UTF-8'>
+                <title>Reçu d'inscription - {$enrollment->enrollment_number}</title>
+                <style>
+                    body { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; color: #222; background: #fff; padding: 20px; }
+                    .receipt { width: 190mm; border: 2px solid #3D2E22; border-radius: 10px; padding: 25px; margin: 0 auto; box-sizing: border-box; }
+                    .header { display: flex; align-items: center; gap: 14px; padding-bottom: 16px; margin-bottom: 20px; border-bottom: 3px double #3D2E22; }
+                    .header img { width: 56px; height: 56px; object-fit: cover; border-radius: 10px; border: 1px solid #ddd; flex-shrink: 0; }
+                    .header .school-name { font-size: 17pt; font-weight: 800; color: #3D2E22; margin: 0; }
+                    .header .school-sub { font-size: 9pt; color: #999; margin: 3px 0 0; }
+                    .receipt-title { text-align: center; margin: 10px 0 20px; }
+                    .receipt-title h2 { font-size: 15pt; letter-spacing: 1px; color: #E67E22; margin: 0; }
+                    .meta-row { display: flex; justify-content: space-between; font-size: 11pt; margin-bottom: 6px; }
+                    .meta-row .label { font-weight: 700; color: #555; }
+                    .section-title { font-size: 10.5pt; font-weight: 700; background: #FEF0E6; color: #3D2E22; padding: 6px 10px; border-left: 4px solid #E67E22; margin: 18px 0 10px; }
+                    table.info-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+                    table.info-table td { padding: 6px 4px; font-size: 11pt; }
+                    table.info-table td.label { font-weight: 700; color: #555; width: 35%; }
+                    .student-identity-row { display: flex; gap: 16px; align-items: stretch; }
+                    .student-photo-box { width: 64px; height: 64px; flex-shrink: 0; border-radius: 10px; border: 1px solid #ddd; background: #F5EFE9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+                    .student-photo-box img { width: 100%; height: 100%; object-fit: cover; }
+                    .student-photo-initials { font-size: 15pt; font-weight: 800; color: #BBA98A; }
+                    table.fin-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+                    table.fin-table th, table.fin-table td { border: 1px solid #ddd; padding: 8px 10px; font-size: 11pt; }
+                    table.fin-table th { background: #FAF7F5; text-align: left; }
+                    table.fin-table td { text-align: right; }
+                    .total-row td { font-weight: 800; background: #F5EFE9; }
+                    .remaining-row td { font-weight: 800; color: " . ($remaining > 0 ? "#C0395A" : "#27AE60") . "; font-size: 13pt; }
+                    .legal-note { margin-top: 16px; font-size: 9.5pt; color: #888; font-style: italic; text-align: center; }
+                    .signature-zone { margin-top: 50px; display: flex; justify-content: flex-end; }
+                    .signature-box { text-align: center; width: 240px; }
+                    .signature-box .role { font-weight: 700; font-size: 10.5pt; margin-bottom: 45px; }
+                    .signature-box .name { font-size: 10pt; color: #555; border-top: 1px solid #999; padding-top: 6px; }
+                    @media print {
+                        body { padding: 0; }
+                        .receipt { border: 2px solid #3D2E22; }
+                    }
+                </style>
+            </head>
+            <body onload='window.print();'>
+                <div class='receipt'>
+
+                    <div class='header'>
+                        " . ($logoUrl ? "<img src='{$logoUrl}' alt='Logo' />" : "") . "
+                        <div>
+                            <p class='school-name'>" . strtoupper($establishment->name ?? 'DEXSCHOOL MANAGER') . "</p>
+                            <p class='school-sub'>Généré via DexSchool Manager · " . ($establishment->address ?? '') . "</p>
+                        </div>
+                    </div>
+
+                    <div class='receipt-title'>
+                        <h2>REÇU D'INSCRIPTION</h2>
+                    </div>
+
+                    <div class='meta-row'>
+                        <span><span class='label'>N° Inscription :</span> {$enrollment->enrollment_number}</span>
+                        <span><span class='label'>Date :</span> {$dateEmission}</span>
+                    </div>
+                    <div class='meta-row'>
+                        <span><span class='label'>Type :</span> " . ($enrollment->type === 'new' ? 'Nouvelle inscription' : 'Réinscription') . "</span>
+                        <span><span class='label'>Année scolaire :</span> " . ($enrollment->academicYear->name ?? '—') . "</span>
+                    </div>
+
+                    <div class='section-title'>IDENTITÉ DE L'ÉLÈVE</div>
+                    <div class='student-identity-row'>
+                        <div class='student-photo-box'>
+                            " . ($studentPhotoUrl
+                                ? "<img src='{$studentPhotoUrl}' alt='Photo élève' />"
+                                : "<span class='student-photo-initials'>{$studentInitials}</span>"
+                            ) . "
+                        </div>
+                        <table class='info-table' style='flex: 1;'>
+                            <tr>
+                                <td class='label'>Nom & Prénoms :</td>
+                                <td>" . strtoupper($student->last_name ?? '') . " " . ($student->first_name ?? '') . "</td>
+                                <td class='label'>Matricule :</td>
+                                <td>{$student->matricule}</td>
+                            </tr>
+                            <tr>
+                                <td class='label'>Classe :</td>
+                                <td>" . ($enrollment->classe->name ?? '—') . "</td>
+                                <td class='label'>Genre :</td>
+                                <td>" . ($student->gender === 'F' ? 'Féminin' : 'Masculin') . "</td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div class='section-title'>DÉTAIL FINANCIER (FCFA)</div>
+                    <table class='fin-table'>
+                        <tr><th>Droit d'inscription</th><td>" . number_format($financial->registration_fee ?? 0, 0, '', ' ') . " FCFA</td></tr>
+                        <tr><th>Scolarité annuelle</th><td>" . number_format($financial->tuition_fee ?? 0, 0, '', ' ') . " FCFA</td></tr>
+                        <tr><th>Frais annexes</th><td>" . number_format($financial->annex_fee ?? 0, 0, '', ' ') . " FCFA</td></tr>
+                        " . (($financial->previous_balance ?? 0) > 0 ? "<tr><th>Reliquat année précédente</th><td>" . number_format($financial->previous_balance, 0, '', ' ') . " FCFA</td></tr>" : "") . "
+                        <tr><th>Réduction / Bourse</th><td>- " . number_format($financial->discount_amount ?? 0, 0, '', ' ') . " FCFA</td></tr>
+                        <tr class='total-row'><th>TOTAL DÛ</th><td>{$totalDue} FCFA</td></tr>
+                        <tr><th>Acompte versé (" . $moyenPaiement . ")</th><td>" . number_format($initialPayment, 0, '', ' ') . " FCFA</td></tr>
+                        <tr class='remaining-row'><th>RESTE À PAYER</th><td>" . number_format($remaining, 0, '', ' ') . " FCFA</td></tr>
+                    </table>
+
+                    <div class='legal-note'>⚠️ Aucun remboursement possible sur les montants encaissés.</div>
+
+                    <div class='signature-zone'>
+                        <div class='signature-box'>
+                            <div class='role'>Signature du comptable</div>
+                        </div>
+                    </div>
+
+                </div>
+            </body>
+            </html>
+            ";
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return "<html><body><p style='color:red; font-family:sans-serif; text-align:center; margin-top:50px;'>Erreur : Inscription introuvable.</p></body></html>";
+        } catch (\Exception $e) {
+            return "<html><body><p style='color:red; font-family:sans-serif;'>Erreur technique : " . $e->getMessage() . "</p></body></html>";
+        }
     }
 }

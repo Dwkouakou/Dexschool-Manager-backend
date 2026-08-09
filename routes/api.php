@@ -155,7 +155,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me/establishment-group', [AffiliatedEstablishmentController::class, 'myGroup']);
     Route::post('/me/switch-establishment/{id}', [AffiliatedEstablishmentController::class, 'switchTo']);
     Route::post('/me/affiliated-establishments', [AffiliatedEstablishmentController::class, 'createChildEstablishment']);
-
+    Route::get('/me/group-financial-summary', [AffiliatedEstablishmentController::class, 'groupFinancialSummary']);
   
 
     // Gestion du profile et parametres 
@@ -233,6 +233,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/students/{id}/balance', [EnrollmentController::class, 'getStudentBalance']);
     Route::get('/enrollments', [EnrollmentController::class, 'index']);
     Route::post('/enrollments', [EnrollmentController::class, 'store']);
+    Route::get('/enrollments/{id}/receipt', [EnrollmentController::class, 'receiptPrint']);
     Route::post('/enrollments/{id}/validate', [EnrollmentController::class, 'validateEnrollment']);
     Route::post('/enrollments/{id}/cancel', [EnrollmentController::class, 'cancelEnrollment']);
     Route::get('/enrollments/{id}', [EnrollmentController::class, 'show']);

@@ -15,12 +15,8 @@ use Illuminate\Validation\Rule;
 
 class ClasseController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
     public function index()
     {
-        //
         try {
 
            $getYears = AcademicYears::where('establishment_id', current_establishment_id())
@@ -65,23 +61,11 @@ class ClasseController extends Controller
         }
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
-   public function store(StoreClassesValidation $request)
+    public function store(StoreClassesValidation $request)
     {
         try {
             $validated = $request->validated();
 
-          
-
-            // if($verifLevelIsEnabled->is_active !== 1) {
-            //     return response()->json([
-            //         "status" => "error",
-            //         "message" => "Impossible de créer la classe, veuillez activer le niveaux !",
-                   
-            //     ], 500);
-            // }
             $academicClass = Classe::create([
                 'level_id'          => $validated['level_id'],
                 'academic_year_id'  => $validated['academic_year_id'],
@@ -90,7 +74,7 @@ class ClasseController extends Controller
                 'capacity'          => $validated['capacity'],
                 'classroom'         => $validated['classroom'] ?? null,
                 'is_active'         => $validated['is_active'] ?? true,
-                'main_teacher_id'   => null, // Isolé temporairement selon notre stratégie
+                'main_teacher_id'   => null,
             ]);
 
             $academicClass->load(['level.cycle', 'academicYear']);
@@ -99,7 +83,7 @@ class ClasseController extends Controller
                 "status" => "success",
                 "message" => "La classe '{$academicClass->name}' a été configurée et créée avec succès !",
                 "academicData" => $academicClass
-            ], 201); 
+            ], 201);
 
         } catch (\Illuminate\Validation\ValidationException $e) {
             return response()->json([
@@ -117,20 +101,13 @@ class ClasseController extends Controller
         }
     }
 
-    /**
-     * Display the specified resource.
-     */
     public function show(string $id)
     {
         //
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
     public function update(Request $request, string $id)
     {
-        // 1. Rechercher la classe existante
         $classe = Classe::find($id);
 
         if (!$classe) {
@@ -140,7 +117,6 @@ class ClasseController extends Controller
             ], 404);
         }
 
-        // 2. Validation des données reçues du formulaire React
         $validator = Validator::make($request->all(), [
             'level_id'         => 'required|integer|exists:levels,id',
             'academic_year_id' => 'required|integer|exists:academic_years,id',
@@ -153,7 +129,7 @@ class ClasseController extends Controller
             ],
             'capacity'         => 'required|integer|min:1',
             'classroom'        => 'nullable|string|max:255',
-            'main_teacher_id'  => 'nullable|integer', 
+            'main_teacher_id'  => 'nullable|integer',
             'is_active'        => 'required|boolean',
         ], [
             'level_id.required'         => 'Le niveau est requis.',
@@ -176,22 +152,19 @@ class ClasseController extends Controller
         }
 
         try {
-            // Mise à jour de la classe avec les données validées
             $classe->update([
                 'level_id'         => $request->level_id,
                 'academic_year_id' => $request->academic_year_id,
                 'name'             => $request->name,
-                'code'             => strtoupper($request->code), 
+                'code'             => strtoupper($request->code),
                 'capacity'         => $request->capacity,
                 'classroom'        => $request->classroom,
                 'main_teacher_id'  => $request->main_teacher_id,
                 'is_active'        => $request->is_active,
             ]);
 
-            // Recharger les relations pour renvoyer un objet complet au React 
             $classe->load(['level', 'level.cycle', 'academicYear']);
 
-          
             return response()->json([
                 'status'  => 'success',
                 'message' => 'La classe a été modifiée avec succès !',
@@ -206,94 +179,43 @@ class ClasseController extends Controller
         }
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
-//    public function destroy(string $id)
-//     {
-//         //  Rechercher la classe par son ID
-//         $classe = Classe::find($id);
-
-//         //  Si la classe n'existe pas, je retourne une erreur
-//         if (!$classe) {
-//             return response()->json([
-//                 'status' => 'error',
-//                 'message' => 'Classe introuvable.'
-//             ], 404);
-//         }
-
-//         try {
-//             // 3. Optionnel : Vérifier si des élèves ou des données y sont liés avant de supprimer
-//             // Si vous avez une relation "students", vous pouvez décommenter ces lignes :
-            
-//             if ($classe->students()->exists()) {
-//                 return response()->json([
-//                     'status' => 'error',
-//                     'message' => 'Impossible de supprimer cette classe car elle contient déjà des élèves inscrits. Désactivez-la plutôt.'
-//                 ], 422);
-//             }
-            
-
-//             // Supprimer l'enregistrement de la base de données
-//             $classe->delete();
-
-//             // 5. Retourner la réponse de succès attendue par votre React
-//             return response()->json([
-//                 'status' => 'success',
-//                 'message' => 'La classe a été supprimée avec succès !'
-//             ], 200);
-
-//         } catch (\Exception $e) {
-//             // En cas d'erreur serveur ou de contrainte d'intégrité de clé étrangère (SQL)
-//             return response()->json([
-//                 'status' => 'error',
-//                 'message' => 'Impossible de supprimer cette classe car elle est liée à d\'autres éléments du système.'
-//             ], 500);
-//         }
-//     }
-
     public function destroy(string $id)
-{
-    // 1. Rechercher la classe par son ID
-    $classe = Classe::find($id);
+    {
+        $classe = Classe::find($id);
 
-    // 2. Si la classe n'existe pas, retourner une erreur
-    if (!$classe) {
-        return response()->json([
-            'status' => 'error',
-            'message' => 'Classe introuvable.'
-        ], 404);
-    }
-
-    try {
-        // 3. SÉCURITÉ : Vérifier s'il y a des inscriptions liées à cette classe
-        if ($classe->enrollments()->exists()) {
+        if (!$classe) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Impossible de supprimer cette classe car elle contient déjà des élèves inscrits. Désactivez-la plutôt via son statut.'
-            ], 422); // Code 422 : Entité non traitable (Erreur logique métier)
+                'message' => 'Classe introuvable.'
+            ], 404);
         }
 
-        // 4. Supprimer la classe si elle est totalement vide
-        $classe->delete();
+        try {
+            if ($classe->enrollments()->exists()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Impossible de supprimer cette classe car elle contient déjà des élèves inscrits. Désactivez-la plutôt via son statut.'
+                ], 422);
+            }
 
-        return response()->json([
-            'status' => 'success',
-            'message' => 'La classe a été supprimée avec succès !'
-        ], 200);
+            $classe->delete();
 
-    } catch (\Exception $e) {
-        return response()->json([
-            'status' => 'error',
-            'message' => 'Une erreur est survenue lors de la suppression de la classe.'
-        ], 500);
+            return response()->json([
+                'status' => 'success',
+                'message' => 'La classe a été supprimée avec succès !'
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Une erreur est survenue lors de la suppression de la classe.'
+            ], 500);
+        }
     }
-}
-
 
     public function getClasses () {
          try {
-      
+
                 $AllClasses = Classe::with(['level.cycle', 'academicYear'])
                                             ->orderBy("is_active", "desc")
                                             ->orderBy("created_at", "asc")
@@ -303,7 +225,7 @@ class ClasseController extends Controller
                     "status" => "success",
                     "data"   => $AllClasses
                 ], 200);
-                        
+
             } catch (\Exception $e) {
                 return response()->json([
                     "status"  => "error",
@@ -313,84 +235,43 @@ class ClasseController extends Controller
             }
     }
 
-    //  public function enrollmentClasses()
-    // {
-    //     // On charge la relation 'level' pour récupérer son 'name' (Petite Section, CP1, etc.)
-    //     $classes = Classe::with('level')
-    //         ->where('is_active', "1")
-    //         ->get();
-
-    //     // Transformation légère pour correspondre aux propriétés attendues par Claude (level: c.level.name)
-    //     $formattedClasses = $classes->map(function ($classe) {
-    //         return [
-    //             'id'    => $classe->id,
-    //             'name'  => $classe->name, // ex: CP1 A
-    //             'code'  => $classe->code,
-    //             'level' => $classe->level ? $classe->level->name : 'N/A', // Transmet le libellé textuel
-    //         ];
-    //     });
-
-    //     return response()->json($formattedClasses, 200);
-    // }
-
-    // public function enrollmentClasses()
-    // {
-    //     // 1. Récupérer l'année académique active pour isoler les inscriptions en cours
-    //     $activeYear = AcademicYears::where('is_active', true)->first();
-    //     $activeYearId = current_active_year_id();
-
-    //     // 2. Charger les classes actives, leur niveau, et compter les inscriptions de cette année active
-    //     $classes = Classe::with('level')
-    //         ->withCount(['enrollments' => function ($query) use ($activeYearId) {
-    //             if ($activeYearId) {
-    //                 $query->where('academic_year_id', $activeYearId);
-    //             }
-    //         }])
-    //         ->where('is_active', true) // Filtre uniquement les classes actives
-    //         ->get();
-
-    //     // 3. Formater les données pour le composant React (CreateEnrollmentPage)
-    //     $formattedClasses = $classes->map(function ($classe) {
-    //         return [
-    //             'id'                => $classe->id,
-    //             'name'              => $classe->name, // ex: CP1 A
-    //             'code'              => $classe->code,
-    //             'level'             => $classe->level ? $classe->level->name : 'N/A', // Libellé textuel du niveau
-    //             'capacity'          => (int) $classe->capacity, // Transmis en entier pour la comparaison React
-    //             'enrollments_count' => (int) $classe->enrollments_count, // Nombre actuel d'élèves inscrits
-    //         ];
-    //     });
-
-    //     return response()->json($formattedClasses, 200);
-    // }
-
+    /**
+     * Liste des classes disponibles pour le formulaire d'inscription, avec
+     * le nombre RÉEL d'élèves inscrits par classe (utilisé pour bloquer la
+     * sélection d'une classe pleine, et l'afficher dans le sélecteur).
+     * GET /classesEnrollment
+     */
     public function enrollmentClasses(Request $request)
-{
-    // Utilise l'année passée en paramètre, sinon repli sur l'année active
-    $targetYearId = $request->query('academic_year_id') ?: current_active_year_id();
+    {
+        $targetYearId = $request->query('academic_year_id') ?: current_active_year_id();
 
-    $classes = Classe::with('level')
-        ->withCount(['enrollments' => function ($query) use ($targetYearId) {
-            $query->where('academic_year_id', $targetYearId);
-        }])
-        ->where('academic_year_id', $targetYearId)
-        ->where('is_active', true)
-        ->get();
+        $classes = Classe::with('level')
+            ->withCount(['enrollments' => function ($query) use ($targetYearId) {
+                // ─── CORRECTIF : une inscription ANNULÉE ne doit jamais
+                // compter comme occupant une place — sinon la classe paraît
+                // à tort pleine (ou plus remplie qu'en réalité) après une
+                // annulation, empêchant d'y réinscrire quelqu'un d'autre
+                // alors qu'une place est réellement libre. ───
+                $query->where('academic_year_id', $targetYearId)
+                      ->where('status', '!=', 'cancelled');
+            }])
+            ->where('academic_year_id', $targetYearId)
+            ->where('is_active', true)
+            ->get();
 
-    $formattedClasses = $classes->map(function ($classe) {
-        return [
-            'id'                => $classe->id,
-            'name'              => $classe->name,
-            'code'              => $classe->code,
-            'level'             => $classe->level ? $classe->level->name : 'N/A',
-            'capacity'          => (int) $classe->capacity,
-            'enrollments_count' => (int) $classe->enrollments_count,
-        ];
-    });
+        $formattedClasses = $classes->map(function ($classe) {
+            return [
+                'id'                => $classe->id,
+                'name'              => $classe->name,
+                'code'              => $classe->code,
+                'level'             => $classe->level ? $classe->level->name : 'N/A',
+                'capacity'          => (int) $classe->capacity,
+                'enrollments_count' => (int) $classe->enrollments_count,
+            ];
+        });
 
-    return response()->json($formattedClasses, 200);
-}
-
+        return response()->json($formattedClasses, 200);
+    }
 
     /**
      * Aperçu : liste des classes de l'année ACTIVE, prêtes à être dupliquées
@@ -417,7 +298,6 @@ class ClasseController extends Controller
             return response()->json(['status' => 'error', 'message' => "Aucune année active à dupliquer."], 422);
         }
 
-        // Classes déjà existantes dans l'année cible (pour éviter les doublons visuels)
         $existingCodes = Classe::where('academic_year_id', $targetYearId)
             ->pluck('code')
             ->toArray();
@@ -482,7 +362,6 @@ class ClasseController extends Controller
                 $sourceClass = Classe::find($item['id']);
                 if (!$sourceClass) continue;
 
-                // Évite le doublon : même niveau + même code déjà présents sur l'année cible
                 $exists = Classe::where('academic_year_id', $targetYear->id)
                     ->where('level_id', $sourceClass->level_id)
                     ->where('code', $sourceClass->code)
@@ -498,9 +377,9 @@ class ClasseController extends Controller
                     'academic_year_id' => $targetYear->id,
                     'name'             => $sourceClass->name,
                     'code'             => $sourceClass->code,
-                    'capacity'         => $item['capacity'], // capacité éventuellement ajustée
+                    'capacity'         => $item['capacity'],
                     'classroom'        => $sourceClass->classroom,
-                    'main_teacher_id'  => null, // l'affectation prof se refait pour la nouvelle année
+                    'main_teacher_id'  => null,
                     'is_active'        => true,
                 ]);
 

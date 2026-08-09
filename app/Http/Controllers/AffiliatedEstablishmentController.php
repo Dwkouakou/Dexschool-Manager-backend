@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Academic\AcademicYears;
 use App\Models\Establishment;
+use App\Models\officeAdministration\EnrollmentFinancial;
 use App\Services\EstablishmentPositionService;
 use App\Services\EstablishmentRoleService;
 use Illuminate\Http\Request;
@@ -315,5 +316,119 @@ class AffiliatedEstablishmentController extends Controller
                 'debug'   => config('app.debug') ? $e->getMessage() : null,
             ], 500);
         }
+    }
+
+    /**
+     * Bilan financier CONSOLIDÉ du groupe scolaire — additionne les
+     * indicateurs (dû, encaissé, reste à recouvrer, effectifs) de tous les
+     * établissements affiliés (parent + enfants), et fournit AUSSI le
+     * détail par établissement pour les onglets côté frontend.
+     *
+     * Réservé à l'Admin de l'établissement RACINE — un établissement enfant
+     * ne peut pas consulter cette vue globale.
+     *
+     * GET /me/group-financial-summary
+     */
+    public function groupFinancialSummary(Request $request)
+    {
+        $user = $request->user();
+
+        $isAdmin = $user->roles()->where('slug', 'admin')->exists();
+        if (!$isAdmin) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Seul l'administrateur peut consulter le bilan financier du groupe."
+            ], 403);
+        }
+
+        $home = Establishment::findOrFail($user->establishment_id);
+
+        // Doit être l'établissement RACINE (pas un enfant) pour voir la
+        // vue consolidée — un enfant n'a de toute façon jamais de quota.
+        if ($home->parent_establishment_id) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cette vue n'est disponible que depuis l'établissement principal du groupe."
+            ], 403);
+        }
+
+        // Tous les établissements du groupe (la racine elle-même + ses enfants)
+        $groupEstablishments = Establishment::where('id', $home->id)
+            ->orWhere('parent_establishment_id', $home->id)
+            ->get();
+
+        $perEstablishment = [];
+        $grandTotalDue      = 0;
+        $grandTotalEncaisse = 0;
+        $grandTotalEleves   = 0;
+
+        foreach ($groupEstablishments as $est) {
+            // Année active DE CET établissement précis (peut différer par cycle)
+            $activeYear = AcademicYears::withoutGlobalScopes()
+                ->where('establishment_id', $est->id)
+                ->where('is_active', true)
+                ->first();
+
+            if (!$activeYear) {
+                // Établissement sans année active configurée — on l'affiche
+                // quand même dans la liste, avec des totaux à zéro, plutôt
+                // que de faire planter tout le bilan du groupe pour ça.
+                $perEstablishment[] = [
+                    'establishment_id'   => $est->id,
+                    'establishment_name' => $est->name,
+                    'establishment_code' => $est->code,
+                    'academic_year'      => null,
+                    'total_due'          => 0,
+                    'total_encaisse'     => 0,
+                    'reste_a_recouvrer'  => 0,
+                    'total_eleves'       => 0,
+                    'warning'            => "Aucune année scolaire active configurée.",
+                ];
+                continue;
+            }
+
+            $financialsQuery = fn() => EnrollmentFinancial::withoutGlobalScopes()
+                ->whereHas('enrollment', function ($q) use ($activeYear, $est) {
+                    $q->withoutGlobalScopes()
+                      ->where('academic_year_id', $activeYear->id)
+                      ->whereHas('student', fn($s) => $s->withoutGlobalScopes()->where('establishment_id', $est->id));
+                });
+
+            $totalDue      = (int) (clone $financialsQuery())->sum('total_due');
+            $totalEncaisse = (int) (clone $financialsQuery())->sum('initial_payment');
+            $totalEleves   = (int) (clone $financialsQuery())->count();
+            $resteA_Recouvrer = max(0, $totalDue - $totalEncaisse);
+
+            $perEstablishment[] = [
+                'establishment_id'   => $est->id,
+                'establishment_name' => $est->name,
+                'establishment_code' => $est->code,
+                'academic_year'      => $activeYear->name,
+                'total_due'          => $totalDue,
+                'total_encaisse'     => $totalEncaisse,
+                'reste_a_recouvrer'  => $resteA_Recouvrer,
+                'total_eleves'       => $totalEleves,
+            ];
+
+            $grandTotalDue      += $totalDue;
+            $grandTotalEncaisse += $totalEncaisse;
+            $grandTotalEleves   += $totalEleves;
+        }
+
+        $grandTotalReste = max(0, $grandTotalDue - $grandTotalEncaisse);
+        $tauxRecouvrement = $grandTotalDue > 0 ? round(($grandTotalEncaisse / $grandTotalDue) * 100, 1) : 0;
+
+        return response()->json([
+            'status' => 'success',
+            'group'  => [
+                'total_due'          => $grandTotalDue,
+                'total_encaisse'     => $grandTotalEncaisse,
+                'reste_a_recouvrer'  => $grandTotalReste,
+                'taux_recouvrement'  => (float) $tauxRecouvrement,
+                'total_eleves'       => $grandTotalEleves,
+                'establishments_count' => $groupEstablishments->count(),
+            ],
+            'per_establishment' => $perEstablishment,
+        ]);
     }
 }

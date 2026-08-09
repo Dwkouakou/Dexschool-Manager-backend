@@ -44,6 +44,8 @@ class Student extends Model
 
         'nationality', 'national_matricule', 'provisional_matricule', 'origin_school',
         'is_transferred', 'is_enrolled', 'assignment_status',
+
+        'religion', 'handicap',
     ];
 
     protected $casts = [
@@ -53,72 +55,38 @@ class Student extends Model
         'academic_year_id' => 'integer',
     ];
 
-    /*
-    |--------------------------------------------------------------------------
-    | RELATIONS (BelongsTo)
-    |--------------------------------------------------------------------------
-    */
-
-    /**
-     * Un élève appartient à une classe.
-     */
     public function classe()
     {
         return $this->belongsTo(Classe::class, 'class_id');
     }
-     
-    /**
-     * Un élève est inscrit pour une année académique spécifique.
-     */
+
     public function academicYear()
     {
         return $this->belongsTo(AcademicYears::class, 'academic_year_id');
     }
 
-    /**
-     * Utilisateur ayant créé le dossier de l'élève.
-     */
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | RELATIONS INDIRECTES (Via d'autres modèles)
-    |--------------------------------------------------------------------------
-    */
-
-    /**
-     * Accéder au niveau (Level) de l'élève en passant par sa classe.
-     * Permet de faire : $student->level
-     */
     public function level()
     {
-        // Un élève a un niveau à travers (hasOneThrough) sa classe
         return $this->hasOneThrough(
-            Level::class, 
-            Classe::class, 
-            'id',         // Clé locale sur la table 'classes' (id de la classe)
-            'id',         // Clé locale sur la table 'levels' (id du level)
-            'class_id',   // Clé étrangère sur la table 'students'
-            'level_id'    // Clé étrangère sur la table 'classes'
+            Level::class,
+            Classe::class,
+            'id',
+            'id',
+            'class_id',
+            'level_id'
         );
     }
 
-
-
-    /**
-     * Un élève possède plusieurs parents/tuteurs enregistrés.
-     */
     public function parents()
     {
         return $this->hasMany(StudentParent::class, 'student_id');
     }
 
-    /**
-     * Relations directes filtrées (Très utile pour vos futurs formulaires)
-     */
     public function father()
     {
         return $this->hasOne(StudentParent::class, 'student_id')->where('type', 'father');
@@ -139,18 +107,22 @@ class Student extends Model
         return $this->hasMany(StudentDocument::class, 'student_id');
     }
 
-
-    // RELATION : Historique complet des inscriptions de l'élève
     public function enrollments()
     {
         return $this->hasMany(Enrollment::class, 'student_id');
     }
 
-    // RELATION : Récupérer la dernière inscription active de l'élève
     public function latestEnrollment()
     {
+        // ─── CORRECTIF : une inscription annulée ne doit jamais être
+        // considérée comme "la dernière inscription" de l'élève — sinon
+        // tout calcul basé dessus (reliquat, résumé financier...) se
+        // baserait à tort sur une tentative annulée plutôt que sur la
+        // vraie dernière inscription active (ou aucune, si toutes ont
+        // été annulées). ───
         return $this->hasOne(Enrollment::class, 'student_id')
         ->withoutGlobalScope('viewingYear')
+        ->where('status', '!=', 'cancelled')
         ->latestOfMany();
     }
 
@@ -162,25 +134,21 @@ class Student extends Model
         return $this->hasMany(TransportSubscription::class);
     }
 
-    // Toutes les notes de l'élève
     public function grades()
     {
         return $this->hasMany(Grade::class, 'student_id');
     }
 
-    // Tout l'historique des présences/absences de l'élève (Module 3)
     public function attendanceRecords()
     {
         return $this->hasMany(AttendanceRecord::class, 'student_id');
     }
 
-    // Récupérer toutes les moyennes par matière de l'élève
     public function subjectAverages()
     {
         return $this->hasMany(SubjectAverage::class, 'student_id');
     }
 
-    // Récupérer les moyennes générales (bulletins) de l'élève
     public function periodAverages()
     {
         return $this->hasMany(PeriodAverage::class, 'student_id');
@@ -190,7 +158,5 @@ class Student extends Model
     {
         return $this->hasMany(StudentAcademicRecord::class);
     }
-
-    
 
 }
