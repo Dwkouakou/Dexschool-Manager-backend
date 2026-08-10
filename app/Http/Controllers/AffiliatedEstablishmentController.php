@@ -324,8 +324,12 @@ class AffiliatedEstablishmentController extends Controller
      * établissements affiliés (parent + enfants), et fournit AUSSI le
      * détail par établissement pour les onglets côté frontend.
      *
-     * Réservé à l'Admin de l'établissement RACINE — un établissement enfant
+     * Réservé à l'établissement RACINE — un établissement enfant
      * ne peut pas consulter cette vue globale.
+     *
+     * Accessible à tout utilisateur ayant la permission "financial_reports.view"
+     * (Admin, Comptable...) — pas réservé au seul Admin, contrairement à la
+     * création d'établissements affiliés.
      *
      * GET /me/group-financial-summary
      */
@@ -333,11 +337,10 @@ class AffiliatedEstablishmentController extends Controller
     {
         $user = $request->user();
 
-        $isAdmin = $user->roles()->where('slug', 'admin')->exists();
-        if (!$isAdmin) {
+        if (!$user->can('financial_reports.view')) {
             return response()->json([
                 'status'  => 'error',
-                'message' => "Seul l'administrateur peut consulter le bilan financier du groupe."
+                'message' => "Vous n'avez pas la permission de consulter les rapports financiers."
             ], 403);
         }
 
