@@ -199,9 +199,17 @@ class StaffAccountController extends Controller
 
         $user->syncRoles($roles);
 
+        // ─── Force la déconnexion : sans ça, une session déjà ouverte
+        // continue de fonctionner avec les ANCIENS rôles/permissions
+        // jusqu'à expiration naturelle du token — la personne reste
+        // "connectée" alors qu'elle vient de perdre (ou changer) tout accès.
+        // Même principe que la désactivation d'établissement/collaborateur
+        // côté SuperAdmin.
+        $user->tokens()->delete();
+
         $message = $roles->isEmpty()
-            ? "Tous les rôles de {$user->name} ont été révoqués. Il/elle n'a plus aucun accès."
-            : "Rôles de {$user->name} mis à jour.";
+            ? "Tous les rôles de {$user->name} ont été révoqués. Il/elle n'a plus aucun accès et a été déconnecté(e)."
+            : "Rôles de {$user->name} mis à jour. Un nouveau login sera nécessaire pour appliquer les changements.";
 
         return response()->json([
             'status'  => 'success',

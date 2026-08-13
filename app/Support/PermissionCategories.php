@@ -129,6 +129,7 @@ class PermissionCategories
         'roles'     => 'administration',
         'reports'   => 'administration',
         'dashboard' => 'administration',
+        'activity_logs' => 'administration',
     ];
 
     /**
@@ -184,6 +185,7 @@ class PermissionCategories
         'roles'     => 'Rôles',
         'reports'   => 'Rapports',
         'dashboard' => 'Tableau de bord',
+        'activity_logs' => "Journal d'activité",
     ];
 
     /**

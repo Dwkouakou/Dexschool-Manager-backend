@@ -28,6 +28,7 @@ use App\Http\Controllers\SuperAdminApiController;
 use App\Http\Controllers\TeacherAttributionController;
 use App\Http\Controllers\TransportController;
 use App\Http\Controllers\AffiliatedEstablishmentController;
+use App\Http\Controllers\EstablishmentActivityLogController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -109,6 +110,7 @@ use Illuminate\Support\Facades\Route;
  
         // Dashboard
         Route::get('/dashboard/stats', [SuperAdminApiController::class, 'dashboardStats']);
+        Route::get('/logs', [SuperAdminApiController::class, 'logs']);
         Route::get('/me',          [SuperAdminApiController::class, 'me']);
         Route::put('/me',          [SuperAdminApiController::class, 'updateProfile']);
         Route::put('/me/password', [SuperAdminApiController::class, 'updatePassword']);
@@ -151,6 +153,9 @@ Route::put("/academic-years/{id}/activate", [AcademicYearsController::class, "ac
     ->middleware(['auth:sanctum', 'school.admin']);
 
 Route::middleware('auth:sanctum')->group(function () {
+    
+    Route::get('/activity-logs', [EstablishmentActivityLogController::class, 'logs']);
+   
 
     Route::get('/me/establishment-group', [AffiliatedEstablishmentController::class, 'myGroup']);
     Route::post('/me/switch-establishment/{id}', [AffiliatedEstablishmentController::class, 'switchTo']);

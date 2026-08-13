@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Academic\AcademicYears;
+use App\Models\ActivityLog;
 use App\Models\Establishment;
 use App\Models\SuperAdmin;
 use App\Models\User;
@@ -251,6 +252,14 @@ class SuperAdminApiController extends Controller
                 return compact('establishment', 'admin', 'year');
             });
 
+            ActivityLog::record(
+                request()->user(),
+                'establishment.created',
+                "A créé l'établissement \"{$result['establishment']->name}\" ({$result['establishment']->code}).",
+                'Establishment',
+                $result['establishment']->id
+            );
+
             return response()->json([
                 'status'        => 'success',
                 'message'       => "Établissement créé avec succès.",
@@ -307,6 +316,14 @@ class SuperAdminApiController extends Controller
         }
         $establishment->save();
 
+        ActivityLog::record(
+            request()->user(),
+            'establishment.updated',
+            "A modifié l'établissement \"{$establishment->name}\" ({$establishment->code}).",
+            'Establishment',
+            $establishment->id
+        );
+
         return response()->json([
             'status'        => 'success',
             'message'       => 'Établissement mis à jour.',
@@ -351,6 +368,16 @@ class SuperAdminApiController extends Controller
                 ->each(fn($u) => $u->tokens()->delete());
         }
 
+        ActivityLog::record(
+            request()->user(),
+            'establishment.toggled',
+            $establishment->is_active
+                ? "A activé l'établissement \"{$establishment->name}\"."
+                : "A désactivé l'établissement \"{$establishment->name}\".",
+            'Establishment',
+            $establishment->id
+        );
+
         return response()->json([
             'status'        => 'success',
             'message'       => $establishment->is_active
@@ -377,7 +404,18 @@ class SuperAdminApiController extends Controller
         }
 
         $name = $establishment->name;
+        $establishmentId = $establishment->id;
         $establishment->delete(); // cascade défini dans les migrations
+
+        // Loggé APRÈS la suppression réelle (avec subject_id conservé pour
+        // référence même si l'établissement n'existe plus en base).
+        ActivityLog::record(
+            request()->user(),
+            'establishment.deleted',
+            "A supprimé l'établissement \"{$name}\" et toutes ses données.",
+            'Establishment',
+            $establishmentId
+        );
 
         return response()->json([
             'status'  => 'success',
@@ -413,6 +451,14 @@ class SuperAdminApiController extends Controller
             'is_active' => true,
         ]);
 
+        ActivityLog::record(
+            request()->user(),
+            'team.created',
+            "A ajouté le collaborateur \"{$member->name}\" ({$member->email}).",
+            'SuperAdmin',
+            $member->id
+        );
+
         return response()->json([
             'status'  => 'success',
             'message' => 'Collaborateur créé avec succès.',
@@ -434,6 +480,16 @@ class SuperAdminApiController extends Controller
             $member->tokens()->delete(); // Force la déconnexion
         }
 
+        ActivityLog::record(
+            request()->user(),
+            'team.toggled',
+            $member->is_active
+                ? "A réactivé le collaborateur \"{$member->name}\"."
+                : "A désactivé le collaborateur \"{$member->name}\".",
+            'SuperAdmin',
+            $member->id
+        );
+
         return response()->json([
             'status'  => 'success',
             'message' => $member->is_active
@@ -454,7 +510,17 @@ class SuperAdminApiController extends Controller
         }
 
         $member = SuperAdmin::findOrFail($id);
+        $memberName = $member->name;
+        $memberId = $member->id;
         $member->delete();
+
+        ActivityLog::record(
+            $request->user(),
+            'team.deleted',
+            "A supprimé le collaborateur \"{$memberName}\".",
+            'SuperAdmin',
+            $memberId
+        );
 
         return response()->json([
             'status'  => 'success',
@@ -495,6 +561,14 @@ class SuperAdminApiController extends Controller
 
         $superAdmin->update($validated);
 
+        ActivityLog::record(
+            $superAdmin,
+            'profile.updated',
+            "A modifié son profil (nom, email ou téléphone).",
+            'SuperAdmin',
+            $superAdmin->id
+        );
+
         return response()->json([
             'status'  => 'success',
             'message' => 'Profil mis à jour avec succès.',
@@ -532,9 +606,62 @@ class SuperAdminApiController extends Controller
         $currentTokenId = $superAdmin->currentAccessToken()?->id;
         $superAdmin->tokens()->where('id', '!=', $currentTokenId)->delete();
 
+        ActivityLog::record(
+            $superAdmin,
+            'password.changed',
+            "A changé son mot de passe.",
+            'SuperAdmin',
+            $superAdmin->id
+        );
+
         return response()->json([
             'status'  => 'success',
             'message' => 'Mot de passe modifié avec succès. Vos autres sessions ont été déconnectées.',
+        ]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // JOURNAL D'ACTIVITÉ
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * GET /superadmin/logs?search=&family=&page=&per_page=
+     * Contrat de réponse attendu par LogsPage.jsx :
+     * { data: [{ id, actor_name, action, description, subject_type,
+     *            subject_id, created_at }], total, last_page }
+     */
+    public function logs(Request $request)
+    {
+        $query = ActivityLog::query();
+
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('description', 'LIKE', "%{$search}%")
+                  ->orWhere('actor_name', 'LIKE', "%{$search}%");
+            });
+        }
+
+        // Familles alignées sur les onglets de LogsPage.jsx : les actions
+        // sont préfixées "establishment." / "team.", tandis que "profile"
+        // regroupe à la fois les modifications de profil et de mot de passe.
+        if ($family = $request->family) {
+            if ($family === 'establishment') {
+                $query->where('action', 'LIKE', 'establishment.%');
+            } elseif ($family === 'team') {
+                $query->where('action', 'LIKE', 'team.%');
+            } elseif ($family === 'profile') {
+                $query->whereIn('action', ['profile.updated', 'password.changed']);
+            }
+        }
+
+        $perPage = (int) ($request->per_page ?? 20);
+        $paginator = $query->orderByDesc('created_at')->paginate($perPage);
+
+        return response()->json([
+            'data'         => $paginator->items(),
+            'total'        => $paginator->total(),
+            'last_page'    => $paginator->lastPage(),
+            'current_page' => $paginator->currentPage(),
         ]);
     }
 }

@@ -6,6 +6,7 @@ use App\Models\Academic\AcademicYears;
 use App\Models\Academic\Classe;
 use App\Models\Academic\Student;
 use App\Models\Canteen\CanteenSubscription;
+use App\Models\EstablishmentActivityLog;
 use App\Models\Library\BookLoan;
 use App\Models\officeAdministration\Enrollment;
 use App\Models\officeAdministration\EnrollmentFinancial;
@@ -72,6 +73,16 @@ class PaymentController extends Controller
             ]);
 
             $financial->increment('initial_payment', $validated['amount_paid']);
+
+            // ─── Journal d'activité établissement ───
+            $studentName = optional($enrollment->student)->first_name . ' ' . optional($enrollment->student)->last_name;
+            EstablishmentActivityLog::record(
+                Auth::user(),
+                'payment.collected',
+                "A encaissé " . number_format($validated['amount_paid'], 0, '', ' ') . " FCFA pour \"{$studentName}\" (reçu {$receiptNumber}).",
+                'Payment',
+                $payment->id
+            );
 
             return response()->json([
                 'status'         => 'success',

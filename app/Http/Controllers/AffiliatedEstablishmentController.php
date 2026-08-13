@@ -104,9 +104,14 @@ class AffiliatedEstablishmentController extends Controller
             'establishments'            => $accessible->map(fn($e) => $this->formatForTabs($e, $user))->values(),
             'current_establishment_id'  => $user->viewing_establishment_id ?? $user->establishment_id,
             // Infos de quota — utile pour l'écran "Établissements affiliés",
-            // uniquement pertinent si l'utilisateur est sur l'établissement
-            // racine (celui qui porte le quota).
-            'quota' => $root && $root->id === $home->id ? [
+            // uniquement pertinent si l'utilisateur CONSULTE ACTUELLEMENT
+            // l'établissement racine (celui qui porte le quota). ─── CORRECTIF :
+            // comparé à current_establishment_id() (établissement réellement
+            // affiché après un switch d'onglet), pas à $home->id (l'origine du
+            // compte, qui ne change jamais) — sinon un Admin dont le compte
+            // est né sur la racine voyait le bouton "Établissements affiliés"
+            // rester actif même en consultant un établissement enfant.
+            'quota' => $root && $root->id === current_establishment_id() ? [
                 'max'       => $root->child_quota,
                 'used'      => Establishment::where('parent_establishment_id', $root->id)->count(),
                 'remaining' => max(0, $root->child_quota - Establishment::where('parent_establishment_id', $root->id)->count()),
@@ -220,7 +225,15 @@ class AffiliatedEstablishmentController extends Controller
             ], 403);
         }
 
-        $home = Establishment::findOrFail($user->establishment_id);
+        // ─── CORRECTIF : current_establishment_id() (établissement
+        // réellement consulté après switch d'onglet) au lieu de
+        // $user->establishment_id (origine du compte, qui ne change jamais).
+        // Sans ça, un Admin dont le compte est né sur la racine pouvait
+        // "créer un établissement affilié" en étant visuellement sur un
+        // enfant — la vérification "un enfant ne peut pas créer" ne se
+        // déclenchait jamais, et le nouvel établissement se retrouvait
+        // rattaché à la racine au lieu d'être bloqué comme il se doit.
+        $home = Establishment::findOrFail(current_establishment_id());
 
         // Un établissement déjà enfant ne peut pas lui-même créer d'affiliés
         if ($home->parent_establishment_id) {
@@ -344,7 +357,12 @@ class AffiliatedEstablishmentController extends Controller
             ], 403);
         }
 
-        $home = Establishment::findOrFail($user->establishment_id);
+        // ─── CORRECTIF : current_establishment_id() au lieu de
+        // $user->establishment_id (origine du compte) — sinon un Admin dont
+        // le compte est né sur la racine gardait un accès direct à cette API
+        // (via appel direct de l'URL) même en consultant un établissement
+        // enfant, malgré le lien masqué côté Sidebar.
+        $home = Establishment::findOrFail(current_establishment_id());
 
         // Doit être l'établissement RACINE (pas un enfant) pour voir la
         // vue consolidée — un enfant n'a de toute façon jamais de quota.
