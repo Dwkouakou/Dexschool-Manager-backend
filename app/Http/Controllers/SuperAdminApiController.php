@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Academic\AcademicYears;
+use App\Mail\EstablishmentWelcomeMail;
 use App\Models\ActivityLog;
 use App\Models\Establishment;
 use App\Models\SuperAdmin;
 use App\Models\User;
+use Illuminate\Support\Facades\Mail;
 use App\Services\EstablishmentRoleService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -260,6 +262,25 @@ class SuperAdminApiController extends Controller
                 $result['establishment']->id
             );
 
+            // ─── Email de bienvenue à l'Admin de l'établissement ───
+            // Envoyé APRÈS la transaction (l'établissement existe déjà en
+            // base à ce stade) et entouré d'un try/catch dédié : un échec
+            // d'envoi (SMTP mal configuré, service indisponible...) ne doit
+            // JAMAIS faire échouer la création de l'établissement elle-même
+            // — celle-ci a déjà réussi, seul l'email est en best-effort.
+            $emailSent = true;
+            try {
+                Mail::to($result['admin']->email)->send(
+                    new EstablishmentWelcomeMail($result['establishment'], $result['admin'], $request->admin_password)
+                );
+            } catch (\Throwable $mailException) {
+                $emailSent = false;
+                Log::warning('Échec envoi email de bienvenue établissement : ' . $mailException->getMessage(), [
+                    'establishment_id' => $result['establishment']->id,
+                    'admin_email'      => $result['admin']->email,
+                ]);
+            }
+
             return response()->json([
                 'status'        => 'success',
                 'message'       => "Établissement créé avec succès.",
@@ -271,6 +292,7 @@ class SuperAdminApiController extends Controller
                     'phone' => $result['admin']->phone,
                 ],
                 'year'          => $result['year'],
+                'email_sent'    => $emailSent,
             ], 201);
 
         } catch (\Throwable $e) {

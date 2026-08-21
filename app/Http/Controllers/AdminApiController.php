@@ -64,43 +64,84 @@ class AdminApiController extends Controller
                 ], 403);
             }
 
-            if ($user->roles()->count() === 0) {
-                return response()->json([
-                    'status'  => 'error',
-                    'message' => "Votre compte n'a pas encore de rôle assigné. Contactez votre administrateur d'établissement."
-                ], 403);
+            // ─── CORRECTIF : détermine l'établissement où la personne a
+            // RÉELLEMENT un rôle actif, avant de choisir où l'envoyer.
+            //
+            // Contexte du bug corrigé : un Admin peut créer un employé sur
+            // l'établissement parent, puis lui attribuer son rôle
+            // uniquement sur un établissement ENFANT du groupe (ex: après
+            // une réorganisation). Le compte se connecte alors avec succès
+            // (il a bien un rôle "quelque part"), mais sans ce correctif il
+            // atterrissait systématiquement sur l'établissement d'ORIGINE
+            // (celui du code établissement saisi) — où il n'a AUCUN rôle,
+            // donc AUCUNE permission, donc un dashboard vide et inutilisable,
+            // sans aucun message d'erreur pour expliquer pourquoi.
+            //
+            // Le correctif : si aucun rôle n'existe sur l'établissement
+            // d'origine, on cherche un rôle actif ailleurs dans le MÊME
+            // groupe scolaire, et on connecte directement la personne sur
+            // cet établissement-là (viewing_establishment_id ajusté en
+            // conséquence) plutôt que de la laisser bloquée sur un
+            // établissement où elle n'a aucun accès.
+            $hasRoleOnOrigin = $user->roles()->where('establishment_id', $establishment->id)->exists();
+
+            $targetEstablishment = $establishment;
+
+            if (!$hasRoleOnOrigin) {
+                $rootId = $establishment->parent_establishment_id ?? $establishment->id;
+
+                $groupEstablishmentIds = Establishment::where('id', $rootId)
+                    ->orWhere('parent_establishment_id', $rootId)
+                    ->pluck('id');
+
+                $roleElsewhereInGroup = \Spatie\Permission\Models\Role::whereIn('establishment_id', $groupEstablishmentIds)
+                    ->whereHas('users', fn($q) => $q->where('users.id', $user->id))
+                    ->first();
+
+                if (!$roleElsewhereInGroup) {
+                    return response()->json([
+                        'status'  => 'error',
+                        'message' => "Votre compte n'a pas encore de rôle assigné, ni sur cet établissement ni sur le reste du groupe scolaire. Contactez votre administrateur d'établissement."
+                    ], 403);
+                }
+
+                $targetEstablishment = Establishment::find($roleElsewhereInGroup->establishment_id);
             }
 
-            $activeYear = AcademicYears::where('establishment_id', $establishment->id)
+            $activeYear = AcademicYears::where('establishment_id', $targetEstablishment->id)
                 ->where('is_active', true)
                 ->first();
 
             if (!$activeYear) {
                 return response()->json([
                     'status'  => 'error',
-                    'message' => "Aucune année scolaire active pour le moment. Contactez votre administrateur."
+                    'message' => "Aucune année scolaire active pour le moment sur \"{$targetEstablishment->name}\". Contactez votre administrateur."
                 ], 403);
             }
 
             $user->tokens()->delete();
 
             // ─── AJOUT CRITIQUE : réinitialise le contexte de switch groupe
-            // scolaire à CHAQUE connexion. Assignation DIRECTE (pas ->update())
-            // pour contourner le piège classique : si "viewing_establishment_id"
-            // n'est pas listé dans le $fillable du modèle User, ->update([...])
-            // l'ignorerait silencieusement (aucune erreur, mais rien n'est écrit).
-            // Sans ce reset, un utilisateur qui avait switché vers un
-            // établissement affilié lors d'une session précédente resterait
-            // "coincé" dessus indéfiniment, même après déconnexion/reconnexion. ───
+            // scolaire à CHAQUE connexion, puis le positionne sur
+            // l'établissement CIBLE déterminé ci-dessus (null si c'est
+            // l'origine, sinon l'établissement où le rôle a été trouvé).
+            // Assignation DIRECTE (pas ->update()) pour contourner le piège
+            // classique : si "viewing_establishment_id" n'est pas listé dans
+            // le $fillable du modèle User, ->update([...]) l'ignorerait
+            // silencieusement (aucune erreur, mais rien n'est écrit). ───
             $user->viewing_year_id = $activeYear->id;
-            $user->viewing_establishment_id = null;
+            $user->viewing_establishment_id = $targetEstablishment->id === $establishment->id
+                ? null
+                : $targetEstablishment->id;
             $user->save();
 
             $token = $user->createToken('main_token', ['*'])->plainTextToken;
 
             $roleName = null;
             try {
-                $roleName = $user->getRoleNames()->first();
+                $roleName = $user->roles()
+                    ->where('establishment_id', $targetEstablishment->id)
+                    ->first()?->name;
             } catch (\Throwable $e) {
                 Log::warning("User {$user->id} sans rôle Spatie : " . $e->getMessage());
             }
@@ -116,9 +157,9 @@ class AdminApiController extends Controller
                     'role'  => $roleName,
                 ],
                 'establishment' => [
-                    'id'   => $establishment->id,
-                    'name' => $establishment->name,
-                    'code' => $establishment->code,
+                    'id'   => $targetEstablishment->id,
+                    'name' => $targetEstablishment->name,
+                    'code' => $targetEstablishment->code,
                 ],
                 'active_year'   => $activeYear,
             ]);

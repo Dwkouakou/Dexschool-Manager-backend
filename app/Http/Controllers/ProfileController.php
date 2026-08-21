@@ -27,7 +27,14 @@ class ProfileController extends Controller
                 'email' => $user->email,
                 'phone' => $user->phone,
                 'photo' => $user->photo ?? null,
-                'roles' => $user->roles->pluck('name'),
+                // ─── CORRECTIF : uniquement les rôles de l'établissement
+                // ACTUELLEMENT CONSULTÉ. Sans ce filtre, un utilisateur avec
+                // plusieurs rôles sur différents établissements du groupe
+                // (accès multi-cycle) voyait s'afficher un rôle qui ne
+                // s'applique pas du tout à l'établissement où il se trouve.
+                'roles' => $user->roles()
+                    ->where('establishment_id', current_establishment_id())
+                    ->pluck('name'),
             ],
         ]);
     }
@@ -126,9 +133,25 @@ class ProfileController extends Controller
         /** @var User $user */
         $user = Auth::user();
 
+        // ─── CORRECTIF : ne prendre en compte QUE les rôles de l'utilisateur
+        // rattachés à l'établissement ACTUELLEMENT CONSULTÉ, pas tous ses
+        // rôles cumulés sur le groupe entier. Sans ce filtre, un utilisateur
+        // avec accès multi-cycle (ex: Comptable sur le parent + Enseignant
+        // sur un établissement enfant) voyait les boutons/pages liés à SON
+        // rôle Enseignant même en étant sur le parent, où ce rôle n'a jamais
+        // été attribué.
+        $permissions = $user->roles()
+            ->where('establishment_id', current_establishment_id())
+            ->with('permissions')
+            ->get()
+            ->flatMap(fn($role) => $role->permissions)
+            ->pluck('name')
+            ->unique()
+            ->values();
+
         return response()->json([
             'status'      => 'success',
-            'permissions' => $user->getAllPermissions()->pluck('name')->values(),
+            'permissions' => $permissions,
         ]);
     }
 }

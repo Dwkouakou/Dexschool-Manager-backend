@@ -37,11 +37,22 @@ class LibraryController extends Controller
             $totalCopies = BookCopy::count();
 
             // 3. Emprunts actuellement en cours (Livres dehors)
-            $activeLoans = BookLoan::where('status', 'borrowed')->count();
+            // ─── CORRECTIF : inclut désormais aussi le statut 'late'. Un
+            // prêt en retard reste un livre "dehors" — il ne doit pas
+            // disparaître du compteur simplement parce que indexLoans()
+            // (page Registre) l'a automatiquement basculé de 'borrowed' à
+            // 'late' lors d'une visite précédente.
+            $activeLoans = BookLoan::whereIn('status', ['borrowed', 'late'])->count();
 
             // 4. ALERTE CRITIQUE : Calcul automatique et rigoureux des retards de restitution
-            // Filtre les prêts non rendus dont la date attendue est strictement inférieure à la date d'aujourd'hui
-            $lateLoansCount = BookLoan::where('status', 'borrowed')
+            // ─── CORRECTIF : même raison qu'au-dessus. Avant, ce compteur
+            // ne regardait que les prêts encore au statut 'borrowed' avec
+            // une échéance dépassée — mais dès qu'un prêt bascule à 'late'
+            // (via indexLoans), il devenait invisible ici, faisant
+            // disparaître l'alerte du dashboard alors même que le livre
+            // est toujours en retard. On compte maintenant les deux
+            // statuts, la condition de date restant la même.
+            $lateLoansCount = BookLoan::whereIn('status', ['borrowed', 'late'])
                 ->where('expected_return_date', '<', $today)
                 ->count();
 
@@ -655,7 +666,20 @@ class LibraryController extends Controller
                 ], 422);
             }
 
-            // 2. Suppression physique en base de données si l'exemplaire est disponible ou déclassé
+            // ─── AJOUT : la contrainte SQL restrictOnDelete() sur
+            // book_loans.book_copy_id empêche de toute façon la suppression
+            // dès qu'un historique de prêt existe (même déjà clôturé), afin
+            // de ne jamais perdre la traçabilité d'un emprunt passé. Sans ce
+            // contrôle explicite, la tentative remontait comme une erreur
+            // SQL brute au lieu d'un message clair pour le bibliothécaire.
+            if ($copy->loans()->exists()) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "Impossible de supprimer cet exemplaire : il possède un historique de prêt, même clôturé. Pour le retirer du service, marquez-le plutôt comme 'Perdu' ou 'Abîmé' via le changement de statut — cela conserve la traçabilité des emprunts passés."
+                ], 422);
+            }
+
+            // 2. Suppression physique en base de données si l'exemplaire n'a jamais été prêté
             $copy->delete();
 
             return response()->json([
@@ -766,6 +790,9 @@ class LibraryController extends Controller
             'loan_date'            => ['required', 'date'],
             'expected_return_date' => ['required', 'date', 'after_or_equal:loan_date'],
             'notes'                => ['nullable', 'string'],
+            // ─── AJOUT : drapeau envoyé par le frontend quand le
+            // bibliothécaire confirme vouloir prêter malgré un retard en cours
+            'force_despite_late'   => ['nullable', 'boolean'],
         ]);
 
         try {
@@ -788,6 +815,37 @@ class LibraryController extends Controller
                     'status'  => 'error',
                     'message' => "Opération refusée : cet exemplaire n'est pas disponible en rayon actuellement (Statut actuel : {$copy->status})."
                 ], 422);
+            }
+
+            // ─── AJOUT : vérification des retards en cours chez l'emprunteur ───
+            // N'empêche pas le prêt (le bibliothécaire garde la main), mais
+            // renvoie un avertissement explicite si non confirmé, plutôt que
+            // de laisser un lecteur déjà en faute accumuler les emprunts
+            // sans que personne ne le remarque au guichet.
+            $today = Carbon::today()->format('Y-m-d');
+            $lateLoansQuery = BookLoan::whereIn('status', ['borrowed', 'late'])
+                ->where('expected_return_date', '<', $today);
+
+            if (!empty($validated['student_id'])) {
+                $lateLoansQuery->where('student_id', $validated['student_id']);
+            } else {
+                $lateLoansQuery->where('employee_id', $validated['employee_id']);
+            }
+
+            $lateLoans = $lateLoansQuery->with('copy.book')->get();
+
+            if ($lateLoans->isNotEmpty() && !$request->boolean('force_despite_late')) {
+                return response()->json([
+                    'status'     => 'warning',
+                    'message'    => "Cet emprunteur a déjà " . $lateLoans->count() . " livre(s) en retard de restitution.",
+                    'late_loans' => $lateLoans->map(function ($l) {
+                        return [
+                            'book_title'           => $l->copy && $l->copy->book ? $l->copy->book->title : 'Ouvrage inconnu',
+                            'inventory_number'     => $l->copy->inventory_number ?? 'N/A',
+                            'expected_return_date' => $l->expected_return_date->format('Y-m-d'),
+                        ];
+                    }),
+                ], 409);
             }
 
             // 4. Exécution unifiée de l'emprunt (Double écriture SQL)

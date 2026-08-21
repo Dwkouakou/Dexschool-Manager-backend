@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Academic\AcademicYears;
 use App\Models\Personel\Employee;
+use App\Models\Transport\TransportPayment;
 use App\Models\Transport\TransportRoute;
 use App\Models\Transport\TransportSubscription;
 use App\Models\Transport\Vehicle;
@@ -15,6 +16,9 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Maatwebsite\Excel\Facades\Excel;
+use App\Exports\TransportReportExport;
 
 class TransportController extends Controller
 {
@@ -37,11 +41,17 @@ class TransportController extends Controller
                 ->where('end_date', '>=', $today)
                 ->count();
 
-            // 2. Recettes de transport encaissées pour le mois en cours (Cumul des acomptes et versements transport)
-            $totalReceipts = TransportSubscription::whereBetween('created_at', [$startOfMonth . ' 00:00:00', $endOfMonth . ' 23:59:59'])
+            // 2. ─── CORRECTIF : Recettes RÉELLEMENT encaissées ce mois-ci,
+            // calculées depuis le journal des versements (transport_payments)
+            // par DATE DE VERSEMENT — pas depuis la date de création de
+            // l'abonnement. Avant ce correctif, un versement complété en
+            // août sur un abonnement créé en juillet n'apparaissait JAMAIS
+            // dans les recettes d'août : le total du mois était faux dès
+            // qu'un versement partiel était complété plus tard.
+            $totalReceipts = TransportPayment::whereBetween('payment_date', [$startOfMonth, $endOfMonth])
                 ->sum('amount_paid');
 
-            // 3. Ventilation analytique détaillée des dépenses exigées par la direction (FCFA)
+            // 3. Ventilation analytique détaillée des dépenses (FCFA)
             $fuelExpenses = VehicleExpense::where('category', 'fuel')
                 ->whereBetween('expense_date', [$startOfMonth, $endOfMonth])
                 ->sum('amount');
@@ -58,15 +68,27 @@ class TransportController extends Controller
                 ->whereBetween('expense_date', [$startOfMonth, $endOfMonth])
                 ->sum('amount');
 
+            // ─── CORRECTIF : catégories manquantes du bilan. Une dépense
+            // d'assurance ou "autre" était bien enregistrée dans le journal
+            // des charges, mais disparaissait silencieusement du calcul de
+            // rentabilité — le bilan montré à la direction était
+            // artificiellement plus optimiste que la réalité.
+            $insuranceExpenses = VehicleExpense::where('category', 'insurance')
+                ->whereBetween('expense_date', [$startOfMonth, $endOfMonth])
+                ->sum('amount');
+
+            $otherExpenses = VehicleExpense::where('category', 'other')
+                ->whereBetween('expense_date', [$startOfMonth, $endOfMonth])
+                ->sum('amount');
+
             // 4. Calcul des totaux et du solde net de rentabilité (Recettes - Dépenses)
             $totalReceiptsInt = (int) $totalReceipts;
-            
-            $totalExpenses = (int) ($fuelExpenses + $washingExpenses + $maintenanceExpenses + $salaryExpenses);
+
+            $totalExpenses = (int) ($fuelExpenses + $washingExpenses + $maintenanceExpenses + $salaryExpenses + $insuranceExpenses + $otherExpenses);
             $netBalance = $totalReceiptsInt - $totalExpenses;
             $isProfit = $netBalance >= 0;
 
-            // 5. PILOTAGE ANALYTIQUE : Coût réel du transport par élève (Total des charges / effectif transporté)
-            // Sécurité contre la division par zéro si aucun élève n'est encore inscrit
+            // 5. PILOTAGE ANALYTIQUE : Coût réel du transport par élève
             $realCostPerStudent = $totalStudents > 0 ? round($totalExpenses / $totalStudents) : 0;
 
             // 6. Envoi de la réponse structurée lue par TransportDashboardPage.jsx
@@ -77,6 +99,8 @@ class TransportController extends Controller
                 'washing_expenses'           => (int) $washingExpenses,
                 'maintenance_expenses'       => (int) $maintenanceExpenses,
                 'salary_expenses'            => (int) $salaryExpenses,
+                'insurance_expenses'         => (int) $insuranceExpenses,
+                'other_expenses'             => (int) $otherExpenses,
                 'total_expenses'             => $totalExpenses,
                 'net_balance'                => (int) $netBalance,
                 'is_profit'                  => (bool) $isProfit,
@@ -100,32 +124,29 @@ class TransportController extends Controller
     public function indexVehicles()
     {
         try {
-            // Chargement optimisé avec la relation chauffeur (issue de votre module Personnel RH)
             $vehicles = Vehicle::with(['driver'])
                 ->orderBy('id', 'desc')
                 ->get();
 
-            // Reformatage propre pour simplifier la lecture des objets par l'interface React
             $formatted = $vehicles->map(function ($veh) {
                 $driver = $veh->driver;
 
                 return [
                     'id'                  => $veh->id,
-                    'name'                => $veh->name, // ex: Car de Ramassage N°1
-                    'registration_number' => $veh->registration_number, // Plaque d'immatriculation
+                    'name'                => $veh->name,
+                    'registration_number' => $veh->registration_number,
                     'brand'               => $veh->brand,
                     'model'               => $veh->model,
-                    'capacity'            => (int) $veh->capacity, // Volume de places assises
+                    'capacity'            => (int) $veh->capacity,
                     'purchase_date'       => $veh->purchase_date ? $veh->purchase_date->format('Y-m-d') : null,
-                    'is_active'           => (bool) $veh->is_active, // true = En ligne, false = Garage/En panne
+                    'is_active'           => (bool) $veh->is_active,
                     'driver_id'           => $veh->driver_id,
 
-                    // Informations simplifiées du chauffeur pour le tableau React
                     'driver' => $driver ? [
                         'id'         => $driver->id,
                         'first_name' => $driver->first_name,
                         'last_name'  => $driver->last_name,
-                        'phone'      => $driver->phone, // Téléphone pour joindre le chauffeur en car
+                        'phone'      => $driver->phone,
                     ] : null,
                 ];
             });
@@ -148,23 +169,20 @@ class TransportController extends Controller
      */
     public function storeVehicle(Request $request)
     {
-        // 1. Validation stricte des données techniques du bus
         $validated = $request->validate([
             'name'                => ['required', 'string', 'max:100'],
-            'registration_number' => ['required', 'string', 'max:50', 'unique:vehicles,registration_number'], // Plaque d'immatriculation unique
+            'registration_number' => ['required', 'string', 'max:50', 'unique:vehicles,registration_number'],
             'brand'               => ['nullable', 'string', 'max:100'],
             'model'               => ['nullable', 'string', 'max:100'],
-            'capacity'            => ['required', 'integer', 'min:1'], // Nombre de places assises
+            'capacity'            => ['required', 'integer', 'min:1'],
             'purchase_date'       => ['nullable', 'date'],
-            'driver_id'           => ['nullable', 'exists:employees,id'], // ID du chauffeur issu du Personnel RH
+            'driver_id'           => ['nullable', 'exists:employees,id'],
         ]);
 
         try {
-            // 2. Standardisation de l'immatriculation en lettres majuscules (ex: 2450gz01 -> 2450GZ01)
             $validated['registration_number'] = strtoupper(trim($validated['registration_number']));
-            $validated['is_active'] = true; // Disponible en ligne d'office à l'enregistrement
+            $validated['is_active'] = true;
 
-            // 3. Insertion propre dans la table vehicles
             $vehicle = Vehicle::create($validated);
 
             return response()->json([
@@ -195,16 +213,14 @@ class TransportController extends Controller
     public function showVehicle(string $id)
     {
         try {
-            // Chargement du véhicule avec toutes ses liaisons comptables et opérationnelles
             $vehicle = Vehicle::with([
                 'driver',
                 'routes',
                 'expenses' => function ($query) {
-                    $query->orderBy('expense_date', 'desc')->take(20); // Les 20 derniers frais du véhicule
+                    $query->orderBy('expense_date', 'desc')->take(20);
                 }
             ])->findOrFail($id);
 
-            // Reformatage propre pour un affichage fluide dans les onglets React
             $formatted = [
                 'id'                  => $vehicle->id,
                 'name'                => $vehicle->name,
@@ -215,14 +231,12 @@ class TransportController extends Controller
                 'purchase_date'       => $vehicle->purchase_date ? $vehicle->purchase_date->format('Y-m-d') : null,
                 'is_active'           => (bool) $vehicle->is_active,
 
-                // Chauffeur attitré (Module Personnel)
                 'driver' => $vehicle->driver ? [
                     'id'         => $vehicle->driver->id,
                     'full_name'  => $vehicle->driver->first_name . ' ' . $vehicle->driver->last_name,
                     'phone'      => $vehicle->driver->phone,
                 ] : null,
 
-                // Liste de toutes les lignes de bus desservies par ce véhicule
                 'routes' => $vehicle->routes->map(function ($route) {
                     return [
                         'id'              => $route->id,
@@ -234,18 +248,16 @@ class TransportController extends Controller
                     ];
                 }),
 
-                // Historique financier propre à ce car de ramassage (FCFA)
                 'expenses' => $vehicle->expenses->map(function ($exp) {
                     return [
                         'id'           => $exp->id,
-                        'title'        => $exp->title, // ex: Achat batterie 12V
+                        'title'        => $exp->title,
                         'amount'       => (int) $exp->amount,
-                        'category'     => $exp->category, // fuel, washing, repair...
+                        'category'     => $exp->category,
                         'expense_date' => $exp->expense_date ? $exp->expense_date->format('Y-m-d') : null,
                     ];
                 }),
                 
-                // Total des dépenses enregistrées sur la vie de ce véhicule
                 'total_expenses_lifetime' => (int) $vehicle->expenses->sum('amount')
             ];
 
@@ -274,23 +286,19 @@ class TransportController extends Controller
         try {
             $vehicle = Vehicle::findOrFail($id);
 
-            // 1. Validation stricte des informations modifiées
             $validated = $request->validate([
                 'name'                => ['required', 'string', 'max:100'],
-                // L'immatriculation doit rester unique, mais on ignore l'ID du bus actuel
                 'registration_number' => ['required', 'string', 'max:50', Rule::unique('vehicles', 'registration_number')->ignore($id)],
                 'brand'               => ['nullable', 'string', 'max:100'],
                 'model'               => ['nullable', 'string', 'max:100'],
                 'capacity'            => ['required', 'integer', 'min:1'],
                 'purchase_date'       => ['nullable', 'date'],
-                'driver_id'           => ['nullable', 'exists:employees,id'], // ID du nouveau chauffeur
+                'driver_id'           => ['nullable', 'exists:employees,id'],
                 'is_active'           => ['required', 'boolean'],
             ]);
 
-            // 2. Standardisation mécanique de l'immatriculation
             $validated['registration_number'] = strtoupper(trim($validated['registration_number']));
 
-            // 3. Application de la mise à jour en base de données
             $vehicle->update($validated);
 
             return response()->json([
@@ -325,10 +333,8 @@ class TransportController extends Controller
     public function destroyVehicle(string $id)
     {
         try {
-            // Compte le nombre de circuits affectés à ce bus scolaire
             $vehicle = Vehicle::withCount('routes')->findOrFail($id);
 
-            // 1. VERROU DE SÉCURITÉ OPÉRATIONNEL : Bloquer si le bus est affecté à des lignes de transport
             if ($vehicle->routes_count > 0) {
                 return response()->json([
                     'status'  => 'error',
@@ -336,7 +342,6 @@ class TransportController extends Controller
                 ], 422);
             }
 
-            // 2. Suppression physique en base de données si le car est totalement libéré
             $vehicle->delete();
 
             return response()->json([
@@ -366,19 +371,16 @@ class TransportController extends Controller
     public function getAvailableDrivers()
     {
         try {
-            // Extraction des employés dont le poste est lié au métier de Chauffeur
-            // On vérifie le nom ou le slug de la relation 'position' (Poste métier)
             $drivers = Employee::with('position')
                 ->whereHas('position', function($query) {
                     $query->where('slug', 'chauffeur')
                         ->orWhere('name', 'LIKE', '%chauffeur%')
                         ->orWhere('name', 'LIKE', '%conducteur%');
                 })
-                ->where('status', 'active') // Uniquement les chauffeurs en poste actuellement
+                ->where('status', 'active')
                 ->orderBy('last_name', 'asc')
                 ->get();
 
-            // Reformatage épuré pour le composant select de React VehiclesListPage.jsx
             $formatted = $drivers->map(function ($drv) {
                 return [
                     'id'         => $drv->id,
@@ -406,28 +408,25 @@ class TransportController extends Controller
     public function indexRoutes()
     {
         try {
-            // Chargement optimisé avec les données du véhicule rattaché
             $routes = TransportRoute::with(['vehicle'])
                 ->orderBy('name', 'asc')
                 ->get();
 
-            // Reformatage propre des structures pour sécuriser les types monétaires en Franc CFA
             $formatted = $routes->map(function ($route) {
                 return [
                     'id'              => $route->id,
                     'vehicle_id'      => $route->vehicle_id,
-                    'name'            => $route->name,            // ex: Ligne 1 - Yamoussoukro Ouest
-                    'departure_point' => $route->departure_point, // ex: Morofé
-                    'arrival_point'   => $route->arrival_point,   // ex: 220 Logements
-                    'stops_circuit'   => $route->stops_circuit,   // Itinéraire textuel libre desservi
-                    'monthly_fee'     => (int) $route->monthly_fee, // Forçage en entier pour le Franc CFA
-                    'is_active'       => (bool) $route->is_active,  // true = Ouverte, false = Fermée
+                    'name'            => $route->name,
+                    'departure_point' => $route->departure_point,
+                    'arrival_point'   => $route->arrival_point,
+                    'stops_circuit'   => $route->stops_circuit,
+                    'monthly_fee'     => (int) $route->monthly_fee,
+                    'is_active'       => (bool) $route->is_active,
 
-                    // Véhicule lié
                     'vehicle' => $route->vehicle ? [
                         'id'                  => $route->vehicle->id,
                         'name'                => $route->vehicle->name,
-                        'registration_number' => $route->vehicle->registration_number, // Plaque d'immatriculation
+                        'registration_number' => $route->vehicle->registration_number,
                     ] : null,
                 ];
             });
@@ -449,20 +448,18 @@ class TransportController extends Controller
      */
     public function storeRoute(Request $request)
     {
-        // 1. Validation stricte du circuit (Tarif obligatoirement entier positif pour le FCFA)
         $validated = $request->validate([
             'vehicle_id'      => ['required', 'exists:vehicles,id'],
             'name'            => ['required', 'string', 'max:150'],
             'departure_point' => ['required', 'string', 'max:150'],
             'arrival_point'   => ['required', 'string', 'max:150'],
-            'stops_circuit'   => ['nullable', 'string'], // Arrêts textuels libres (Morofé, Dioulakro...)
-            'monthly_fee'     => ['required', 'integer', 'min:0'], // Forfait mensuel en FCFA
+            'stops_circuit'   => ['nullable', 'string'],
+            'monthly_fee'     => ['required', 'integer', 'min:0'],
         ]);
 
         try {
-            $validated['is_active'] = true; // Ouverte aux inscriptions par défaut
+            $validated['is_active'] = true;
 
-            // 2. Insertion propre en base de données
             $route = TransportRoute::create($validated);
 
             return response()->json([
@@ -493,23 +490,20 @@ class TransportController extends Controller
     public function showRoute(string $id)
     {
         try {
-            // Chargement de la ligne avec le véhicule, son chauffeur et les élèves inscrits
             $route = TransportRoute::with([
                 'vehicle.driver',
                 'subscriptions.student.classe'
             ])->findOrFail($id);
 
-            // Reformatage propre des structures pour l'interface React
             $formatted = [
                 'id'              => $route->id,
                 'name'            => $route->name,
                 'departure_point' => $route->departure_point,
                 'arrival_point'   => $route->arrival_point,
                 'stops_circuit'   => $route->stops_circuit,
-                'monthly_fee'     => (int) $route->monthly_fee, // Forçage en Franc CFA
+                'monthly_fee'     => (int) $route->monthly_fee,
                 'is_active'       => (bool) $route->is_active,
 
-                // Informations du matériel de transport assigné
                 'vehicle' => $route->vehicle ? [
                     'id'                  => $route->vehicle->id,
                     'name'                => $route->vehicle->name,
@@ -519,7 +513,6 @@ class TransportController extends Controller
                         : 'Aucun chauffeur assigné',
                 ] : null,
 
-                // Fichier complet des élèves qui utilisent cette ligne
                 'subscribers' => $route->subscriptions->map(function ($sub) {
                     $student = $sub->student;
                     return [
@@ -528,12 +521,11 @@ class TransportController extends Controller
                         'matricule'       => $student ? $student->matricule : 'N/A',
                         'full_name'       => $student ? $student->first_name . ' ' . $student->last_name : 'Élève inconnu',
                         'class_name'      => ($student && $student->classe) ? $student->classe->name : 'N/A',
-                        'status'          => $sub->status, // active, suspended, inactive
-                        'payment_status'  => $sub->payment_status // paid, partial, unpaid
+                        'status'          => $sub->status,
+                        'payment_status'  => $sub->payment_status
                     ];
                 }),
                 
-                // Statistique d'occupation pour le gestionnaire
                 'total_subscribers_count' => $route->subscriptions->where('status', 'active')->count()
             ];
 
@@ -562,25 +554,23 @@ class TransportController extends Controller
         try {
             $route = TransportRoute::findOrFail($id);
 
-            // 1. Validation stricte des modifications (FCFA strict entier positif)
             $validated = $request->validate([
                 'vehicle_id'      => ['required', 'exists:vehicles,id'],
                 'name'            => ['required', 'string', 'max:150'],
                 'departure_point' => ['required', 'string', 'max:150'],
                 'arrival_point'   => ['required', 'string', 'max:150'],
                 'stops_circuit'   => ['nullable', 'string'],
-                'monthly_fee'     => ['required', 'integer', 'min:0'], // Nouveau forfait mensuel
+                'monthly_fee'     => ['required', 'integer', 'min:0'],
                 'is_active'       => ['required', 'boolean'],
             ]);
 
-            // 2. Application de la mise à jour sécurisée avec la syntaxe native PHP
             $route->update([
                 'vehicle_id'      => (int) $validated['vehicle_id'],
                 'name'            => trim($validated['name']),
                 'departure_point' => trim($validated['departure_point']),
                 'arrival_point'   => trim($validated['arrival_point']),
                 'stops_circuit'   => $validated['stops_circuit'] ? trim($validated['stops_circuit']) : null,
-                'monthly_fee'     => (int) $validated['monthly_fee'], // Remplacement du Math.round par un cast PHP strict
+                'monthly_fee'     => (int) $validated['monthly_fee'],
                 'is_active'       => (bool) $validated['is_active'],
             ]);
 
@@ -616,10 +606,8 @@ class TransportController extends Controller
     public function destroyRoute(string $id)
     {
         try {
-            // Récupère la ligne en comptant le nombre d'élèves abonnés
             $route = TransportRoute::withCount('subscriptions')->findOrFail($id);
 
-            // 1. VERROU DE SÉCURITÉ COMPTABLE : Empêcher la suppression si des élèves y sont inscrits
             if ($route->subscriptions_count > 0) {
                 return response()->json([
                     'status'  => 'error',
@@ -627,7 +615,6 @@ class TransportController extends Controller
                 ], 422);
             }
 
-            // 2. Suppression de la ligne si la table est libre de toute attache
             $route->delete();
 
             return response()->json([
@@ -657,19 +644,19 @@ class TransportController extends Controller
    public function indexSubscriptions()
 {
     try {
-        // ── LE CORRECTIF AUTOMATIQUE : Désactive les cartes périmées à la seconde où on charge la page
         $todayStr = \Illuminate\Support\Carbon::today()->format('Y-m-d');
         
         TransportSubscription::where('status', 'active')
             ->where('end_date', '<', $todayStr)
-            ->update(['status' => 'inactive']); // Modifie directement la base de données pour les retardataires
+            ->update(['status' => 'inactive']);
 
-        // 1. Suite du code : Chargement des abonnements avec les relations
-        $subscriptions = TransportSubscription::with(['student.classe', 'route'])
+        // ─── AJOUT : charge aussi le journal des versements de chaque
+        // abonnement, pour alimenter la fenêtre "Reçus & Versements" du
+        // frontend avec les VRAIES données au lieu du repli factice.
+        $subscriptions = TransportSubscription::with(['student.classe', 'route', 'payments'])
             ->latest()
             ->get();
 
-        // 2. Reformatage adaptatif pour React (Le reste de votre fonction indexSubscriptions...)
         $formatted = $subscriptions->map(function ($sub) {
             $student = $sub->student;
             return [
@@ -691,10 +678,28 @@ class TransportController extends Controller
                     'photo'      => $student->photo, 
                 ] : null,
                 'class_name' => ($student && $student->classe) ? $student->classe->name : 'Non affecté',
+                // ─── CORRECTIF : "monthly_fee" manquait ici — c'est
+                // exactement ce qui alimente l'auto-remplissage du prix
+                // dans la modale "Renouveler". Sans lui, le prix restait
+                // toujours vide (affiché à 0), et comme le champ n'est
+                // plus modifiable manuellement, le renouvellement
+                // devenait bloqué à tort.
                 'route' => $sub->route ? [
-                    'id'   => $sub->route->id,
-                    'name' => $sub->route->name,
+                    'id'          => $sub->route->id,
+                    'name'        => $sub->route->name,
+                    'monthly_fee' => (int) $sub->route->monthly_fee,
                 ] : null,
+                // ─── AJOUT : journal des versements, format attendu tel
+                // quel par TransportSubscriptionsPage.jsx (fenêtre reçus +
+                // ticket imprimable).
+                'payments' => $sub->payments->map(function ($p) {
+                    return [
+                        'id'          => $p->id,
+                        'amount_paid' => (int) $p->amount_paid,
+                        'created_at'  => $p->created_at, // CORRECTIF : vraie heure du versement, plus de T00:00:00 forcé
+                        'reference'   => $p->receipt_number,
+                    ];
+                }),
             ];
         });
 
@@ -724,9 +729,16 @@ class TransportController extends Controller
         ]);
 
         try {
-            // 2. Récupérer l'ID de l'année académique active automatiquement
-            // Ajustez le chemin vers votre modèle exact d'année scolaire si nécessaire
-            $activeYearId = AcademicYears::where('is_active', 1)->value('id');
+            // ─── CORRECTIF : l'année scolaire active doit être celle de
+            // L'ÉTABLISSEMENT ACTUELLEMENT CONSULTÉ, pas la première
+            // trouvée dans TOUTE la base. Sans ce filtre, sur un groupe
+            // scolaire ou plusieurs clients partageant la même base, cette
+            // requête pouvait piocher l'année active d'un AUTRE
+            // établissement — un bug déjà rencontré et corrigé ailleurs
+            // dans l'application cette session.
+            $activeYearId = AcademicYears::where('establishment_id', current_establishment_id())
+                ->where('is_active', 1)
+                ->value('id');
 
             if (!$activeYearId) {
                 return response()->json([
@@ -735,7 +747,6 @@ class TransportController extends Controller
                 ], 422);
             }
 
-            // 3. SÉCURITÉ ANTI-DOUBLON : Un élève ne peut pas avoir deux cartes de bus pour la même année
             $exists = TransportSubscription::where('student_id', $validated['student_id'])
                 ->where('academic_year_id', $activeYearId)
                 ->exists();
@@ -747,31 +758,50 @@ class TransportController extends Controller
                 ], 422);
             }
 
-            // 4. Ventilation automatique des indicateurs de caisse transport (FCFA)
             $total = (int) $validated['total_amount'];
             $paid  = (int) $validated['amount_paid'];
 
             if ($paid >= $total) {
-                $paymentStatus = 'paid';    // Intégralement soldé
+                $paymentStatus = 'paid';
             } elseif ($paid > 0 && $paid < $total) {
-                $paymentStatus = 'partial'; // Acompte / Avance enregistrée
+                $paymentStatus = 'partial';
             } else {
-                $paymentStatus = 'unpaid';  // Aucun versement de départ effectué
+                $paymentStatus = 'unpaid';
             }
 
-            // 5. Enregistrement propre dans la table transport_subscriptions
-            $subscription = TransportSubscription::create([
-                'student_id'       => $validated['student_id'],
-                'academic_year_id' => $activeYearId,
-                'route_id'         => (int) $validated['route_id'],
-                'start_date'       => $validated['start_date'],
-                'end_date'         => $validated['end_date'],
-                'total_amount'     => $total,
-                'amount_paid'      => $paid,
-                'status'           => 'active', // Actif d'office à la création
-                'payment_status'   => $paymentStatus,
-                'notes'            => $validated['notes'] ?? null,
-            ]);
+            // ─── Transaction : la création de l'abonnement ET l'écriture
+            // du premier versement dans le journal doivent réussir
+            // ensemble, ou pas du tout.
+            $subscription = DB::transaction(function () use ($validated, $activeYearId, $total, $paid, $paymentStatus) {
+                $sub = TransportSubscription::create([
+                    'student_id'       => $validated['student_id'],
+                    'academic_year_id' => $activeYearId,
+                    'route_id'         => (int) $validated['route_id'],
+                    'start_date'       => $validated['start_date'],
+                    'end_date'         => $validated['end_date'],
+                    'total_amount'     => $total,
+                    'amount_paid'      => $paid,
+                    'status'           => 'active',
+                    'payment_status'   => $paymentStatus,
+                    'notes'            => $validated['notes'] ?? null,
+                ]);
+
+                // ─── AJOUT : si un acompte de départ est versé à la
+                // création, il doit lui aussi apparaître dans le journal
+                // des versements (sinon ce premier montant resterait
+                // invisible dans l'historique et les reçus).
+                if ($paid > 0) {
+                    TransportPayment::create([
+                        'subscription_id' => $sub->id,
+                        'receipt_number'  => static::generateTransportReceiptNumber(),
+                        'amount_paid'     => $paid,
+                        'payment_date'    => $validated['start_date'],
+                        'created_by'      => Auth::id() ?? null,
+                    ]);
+                }
+
+                return $sub;
+            });
 
             return response()->json([
                 'status'  => 'success',
@@ -795,30 +825,27 @@ class TransportController extends Controller
     public function showSubscription(string $id)
     {
         try {
-            // Chargement en cascade des relations indispensables
             $subscription = TransportSubscription::with([
                 'student.classe', 
-                'route.vehicle.driver'
+                'route.vehicle.driver',
+                'payments',
             ])->findOrFail($id);
 
             $student = $subscription->student;
             $route = $subscription->route;
 
-            // Reformatage propre des structures pour l'arborescence React
             $formatted = [
                 'id'             => $subscription->id,
                 'start_date'     => $subscription->start_date ? $subscription->start_date->format('Y-m-d') : null,
                 'end_date'       => $subscription->end_date ? $subscription->end_date->format('Y-m-d') : null,
-                'status'         => $subscription->status,          // active, inactive, suspended
-                'payment_status' => $subscription->payment_status,   // unpaid, partial, paid
+                'status'         => $subscription->status,
+                'payment_status' => $subscription->payment_status,
                 'notes'          => $subscription->notes,
                 
-                // Comptabilité analytique en Franc CFA (Entiers)
                 'total_amount'   => (int) $subscription->total_amount,
                 'amount_paid'    => (int) $subscription->amount_paid,
                 'remaining'      => (int) max(0, $subscription->total_amount - $subscription->amount_paid),
 
-                // Profil permanent de l'élève
                 'student' => $student ? [
                     'id'          => $student->id,
                     'matricule'   => $student->matricule,
@@ -829,15 +856,14 @@ class TransportController extends Controller
                     'class_name'  => $student->classe ? $student->classe->name : 'N/A',
                 ] : null,
 
-                // Détails de l'itinéraire et du véhicule rattaché
                 'route' => $route ? [
                     'id'              => $route->id,
                     'name'            => $route->name,
+                    'monthly_fee'     => (int) $route->monthly_fee,
                     'departure_point' => $route->departure_point,
                     'arrival_point'   => $route->arrival_point,
                     'stops_circuit'   => $route->stops_circuit,
                     
-                    // Véhicule et Chauffeur assignés au circuit
                     'vehicle' => $route->vehicle ? [
                         'id'                  => $route->vehicle->id,
                         'name'                => $route->vehicle->name,
@@ -848,6 +874,16 @@ class TransportController extends Controller
                         'driver_phone'        => $route->vehicle->driver ? $route->vehicle->driver->phone : null,
                     ] : null,
                 ] : null,
+
+                // ─── AJOUT : journal des versements ───
+                'payments' => $subscription->payments->map(function ($p) {
+                    return [
+                        'id'          => $p->id,
+                        'amount_paid' => (int) $p->amount_paid,
+                        'created_at'  => $p->created_at, // CORRECTIF : vraie heure du versement, plus de T00:00:00 forcé
+                        'reference'   => $p->receipt_number,
+                    ];
+                }),
             ];
 
             return response()->json($formatted, 200);
@@ -876,19 +912,17 @@ class TransportController extends Controller
         try {
             $subscription = TransportSubscription::findOrFail($id);
 
-            // 1. Validation stricte des données modifiées (FCFA strict entier positif)
             $validated = $request->validate([
                 'route_id'     => ['required', 'exists:transport_routes,id'],
                 'start_date'   => ['required', 'date'],
                 'end_date'     => ['required', 'date', 'after_or_equal:start_date'],
                 'total_amount' => ['required', 'integer', 'min:0'],
-                'status'       => ['required', 'in:active,inactive,suspended'], // active = En ligne, suspended = Carte bloquée
+                'status'       => ['required', 'in:active,inactive,suspended'],
                 'notes'        => ['nullable', 'string'],
             ]);
 
-            // 2. Recalcul dynamique du statut de recouvrement en caisse transport (FCFA)
             $total = (int) $validated['total_amount'];
-            $paid  = (int) $subscription->amount_paid; // On fige l'argent déjà encaissé par le passé
+            $paid  = (int) $subscription->amount_paid;
 
             if ($paid >= $total) {
                 $paymentStatus = 'paid';
@@ -898,7 +932,6 @@ class TransportController extends Controller
                 $paymentStatus = 'unpaid';
             }
 
-            // 3. Application de la mise à jour en base de données
             $subscription->update([
                 'route_id'       => (int) $validated['route_id'],
                 'start_date'     => $validated['start_date'],
@@ -944,15 +977,22 @@ class TransportController extends Controller
         try {
             $subscription = TransportSubscription::findOrFail($id);
 
-            // 1. VERROU DE SÉCURITÉ COMPTABLE : Interdire la suppression si la caisse a déjà encaissé de l'argent
-            if ((int) $subscription->amount_paid > 0) {
+            // ─── CORRECTIF : bloque désormais la suppression tant que le
+            // solde n'est pas ENTIÈREMENT réglé (payment_status !== 'paid'),
+            // pas seulement "un premier versement existe". Avant ce
+            // correctif, un abonnement encore partiellement dû pouvait
+            // être supprimé dès que amount_paid était exactement 0 —
+            // effaçant une dette réelle sans laisser aucune trace pour
+            // l'audit. Le bouton "Supprimer" reste désormais actif
+            // uniquement une fois la carte totalement soldée.
+            if ($subscription->payment_status !== 'paid') {
+                $remaining = max(0, (int) $subscription->total_amount - (int) $subscription->amount_paid);
                 return response()->json([
                     'status'  => 'error',
-                    'message' => "Impossible de supprimer définitivement cet abonnement car un versement de " . number_format($subscription->amount_paid, 0, '', ' ') . " FCFA a déjà été encaissé. Veuillez plutôt modifier le statut de l'élève en 'Inactif' ou 'Suspendu'."
+                    'message' => "Impossible de supprimer cet abonnement : le solde n'est pas encore intégralement réglé (reste à payer : " . number_format($remaining, 0, '', ' ') . " FCFA). Réglez d'abord le montant dû, ou changez le statut en 'Inactif' plutôt que de supprimer."
                 ], 422);
             }
 
-            // 2. Suppression physique en base de données si aucun flux financier n'est enregistré
             $subscription->delete();
 
             return response()->json([
@@ -982,21 +1022,18 @@ class TransportController extends Controller
     public function collectTransportPayment(Request $request, string $id)
     {   
          assert_writable_year();
-        // 1. Validation du montant versé en Franc CFA (entier positif)
         $validated = $request->validate([
-            'amount_to_pay' => ['required', 'integer', 'min:500'], // Minimum 500 FCFA par versement
+            'amount_to_pay' => ['required', 'integer', 'min:500'],
         ]);
 
         try {
             $subscription = TransportSubscription::findOrFail($id);
 
-            // 2. Calcul des verrous financiers en base de données
             $totalDue = (int) $subscription->total_amount;
             $currentPaid = (int) $subscription->amount_paid;
             $remaining = max(0, $totalDue - $currentPaid);
             $newAmount = (int) $validated['amount_to_pay'];
 
-            // SÉCURITÉ COMPTABLE : Bloquer si le versement dépasse la dette transport de l'élève
             if ($newAmount > $remaining) {
                 return response()->json([
                     'status'  => 'error',
@@ -1004,28 +1041,41 @@ class TransportController extends Controller
                 ], 422);
             }
 
-            // 3. Application comptable sécurisée dans une transaction SQL
             return DB::transaction(function () use ($subscription, $currentPaid, $newAmount, $totalDue) {
                 
-                // Calcul du nouveau cumul payé
                 $updatedPaid = $currentPaid + $newAmount;
                 
-                // Recalcul du statut de recouvrement de la carte de bus
                 if ($updatedPaid >= $totalDue) {
                     $paymentStatus = 'paid';
                 } else {
                     $paymentStatus = 'partial';
                 }
 
-                // Mise à jour de la fiche d'abonnement transport
                 $subscription->update([
                     'amount_paid'    => $updatedPaid,
                     'payment_status' => $paymentStatus
                 ]);
 
+                // ─── AJOUT : chaque versement devient sa propre ligne
+                // dans le journal, avec un numéro de reçu unique — c'est
+                // CE journal (pas le total cumulé sur l'abonnement) qui
+                // sert désormais de base aux reçus imprimables et à
+                // l'historique, exactement comme le système de paiements
+                // de la scolarité.
+                $receiptNumber = static::generateTransportReceiptNumber();
+
+                $payment = TransportPayment::create([
+                    'subscription_id' => $subscription->id,
+                    'receipt_number'  => $receiptNumber,
+                    'amount_paid'     => $newAmount,
+                    'payment_date'    => now()->format('Y-m-d'),
+                    'created_by'      => Auth::id() ?? null,
+                ]);
+
                 return response()->json([
                     'status'  => 'success',
-                    'message' => "Versement de " . number_format($newAmount, 0, '', ' ') . " FCFA enregistré avec succès. La carte de bus de l'élève a été créditée."
+                    'message' => "Versement de " . number_format($newAmount, 0, '', ' ') . " FCFA enregistré avec succès sous le reçu {$receiptNumber}.",
+                    'receipt_number' => $receiptNumber,
                 ], 200);
             });
 
@@ -1044,39 +1094,234 @@ class TransportController extends Controller
     }
 
     /**
+     * ─── AJOUT : Renouvellement d'un abonnement pour une nouvelle période
+     * — même principe que le module Cantine : on ne demande QUE le prix de
+     * la nouvelle période (jamais un total cumulé à recalculer à la main),
+     * le backend fait l'addition lui-même. Élimine tout risque d'erreur de
+     * saisie ou de confusion sur "faut-il remettre le total ou juste le
+     * complément ?".
+     * URL: POST /api/transport-subscriptions/{id}/renew
+     */
+    public function renewSubscription(Request $request, string $id)
+    {
+        assert_writable_year();
+
+        $validated = $request->validate([
+            'period_amount' => ['required', 'integer', 'min:0'],
+            'new_end_date'  => ['required', 'date'],
+            'payment_now'   => ['nullable', 'integer', 'min:0'],
+            'notes'         => ['nullable', 'string'],
+        ]);
+
+        try {
+            $subscription = TransportSubscription::findOrFail($id);
+
+            return DB::transaction(function () use ($subscription, $validated) {
+                $periodAmount = (int) $validated['period_amount'];
+                $paymentNow = (int) ($validated['payment_now'] ?? 0);
+
+                $newTotal = (int) $subscription->total_amount + $periodAmount;
+                $newPaid = (int) $subscription->amount_paid + $paymentNow;
+
+                if ($newPaid >= $newTotal) {
+                    $paymentStatus = 'paid';
+                } elseif ($newPaid > 0) {
+                    $paymentStatus = 'partial';
+                } else {
+                    $paymentStatus = 'unpaid';
+                }
+
+                $subscription->update([
+                    'total_amount'   => $newTotal,
+                    'amount_paid'    => $newPaid,
+                    'end_date'       => $validated['new_end_date'],
+                    'status'         => 'active', // Une reprise de service après renouvellement redevient active
+                    'payment_status' => $paymentStatus,
+                    'notes'          => $validated['notes'] ?? $subscription->notes,
+                ]);
+
+                // ─── CORRECTIF : une ligne est désormais TOUJOURS créée
+                // dans le journal au moment du renouvellement — même à
+                // 0 FCFA si aucun versement immédiat n'est fait. Avant ce
+                // correctif, renouveler sans payer ne laissait AUCUNE
+                // trace de l'événement : impossible de savoir quand la
+                // période avait été prolongée, le reçu affichait toujours
+                // la date du tout premier versement. "payment_method"
+                // permet de distinguer clairement un renouvellement (même
+                // sans argent) d'un vrai encaissement en caisse.
+                TransportPayment::create([
+                    'subscription_id' => $subscription->id,
+                    'receipt_number'  => static::generateTransportReceiptNumber(),
+                    'amount_paid'     => $paymentNow, // Peut être 0 — trace l'événement quand même
+                    'payment_date'    => now()->format('Y-m-d'),
+                    'payment_method'  => $paymentNow > 0 ? 'cash' : 'renewal',
+                    'notes'           => "Renouvellement — nouvelle période jusqu'au " . \Carbon\Carbon::parse($validated['new_end_date'])->format('d/m/Y') . (($paymentNow > 0) ? '' : ' (aucun versement à cette date)'),
+                    'created_by'      => Auth::id() ?? null,
+                ]);
+
+                return response()->json([
+                    'status'  => 'success',
+                    'message' => "Abonnement renouvelé avec succès jusqu'au " . \Carbon\Carbon::parse($validated['new_end_date'])->format('d/m/Y') . ".",
+                ], 200);
+            });
+
+        } catch (ModelNotFoundException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Abonnement de transport introuvable.'
+            ], 404);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors du renouvellement de l’abonnement.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ─── AJOUT : Génère le PDF de la carte de transport d'un élève —
+     * c'est CETTE route que le QR code de la carte encode. Volontairement
+     * PUBLIQUE (aucune authentification) : la personne qui scanne (parent,
+     * chauffeur, agent de sécurité au portail) n'a pas de compte sur la
+     * plateforme. Les informations exposées sont strictement celles déjà
+     * visibles sur la carte physique elle-même — rien de plus sensible.
+     * URL: GET /public/transport-card/{id}/pdf (hors groupe auth:sanctum)
+     */
+    public function downloadCardPdf(string $id)
+    {
+        try {
+            $subscription = TransportSubscription::with(['student', 'route'])->findOrFail($id);
+
+            // L'établissement est déduit de l'abonnement lui-même (pas de
+            // current_establishment_id() ici puisque la route est publique
+            // et n'a donc pas de "contexte" de connexion pour la déterminer).
+            $establishment = \App\Models\Establishment::find($subscription->establishment_id);
+
+            $pdf = Pdf::loadView('pdf.transport-card-pdf', [
+                'subscription'      => $subscription,
+                'establishmentName' => $establishment->name ?? 'Établissement scolaire',
+            ]);
+
+            $fileName = 'carte-transport-' . ($subscription->student->matricule ?? $subscription->id) . '.pdf';
+
+            return $pdf->stream($fileName);
+
+        } catch (ModelNotFoundException $e) {
+            abort(404, 'Carte de transport introuvable.');
+        } catch (\Exception $e) {
+            abort(500, 'Erreur lors de la génération du document.');
+        }
+    }
+
+    /**
+     * ─── AJOUT : Historique global de TOUS les versements de transport,
+     * tous élèves confondus — pour l'audit et le contrôle comptable
+     * d'ensemble, en miroir de "Historique des reçus" côté scolarité.
+     * URL: GET /api/transport/payments/receipts
+     */
+    public function transportReceiptsHistory(Request $request)
+    {
+        try {
+            $query = TransportPayment::with(['subscription.student.classe', 'subscription.route', 'creator']);
+
+            if ($search = $request->query('q')) {
+                $query->whereHas('subscription.student', function ($q) use ($search) {
+                    $q->where('first_name', 'LIKE', "%{$search}%")
+                      ->orWhere('last_name', 'LIKE', "%{$search}%")
+                      ->orWhere('matricule', 'LIKE', "%{$search}%");
+                });
+            }
+
+            if ($from = $request->query('from')) {
+                $query->where('payment_date', '>=', $from);
+            }
+            if ($to = $request->query('to')) {
+                $query->where('payment_date', '<=', $to);
+            }
+
+            $payments = $query->orderByDesc('payment_date')->orderByDesc('id')->paginate(30);
+
+            $formatted = collect($payments->items())->map(function ($p) {
+                $student = $p->subscription?->student;
+                return [
+                    'id'             => $p->id,
+                    'receipt_number' => $p->receipt_number,
+                    'amount_paid'    => (int) $p->amount_paid,
+                    'payment_date'   => $p->payment_date ? $p->payment_date->format('Y-m-d') : null,
+                    'student_name'   => $student ? "{$student->first_name} {$student->last_name}" : 'Élève inconnu',
+                    'matricule'      => $student?->matricule,
+                    'class_name'     => $student?->classe?->name,
+                    'route_name'     => $p->subscription?->route?->name,
+                    'created_by'     => $p->creator?->name,
+                ];
+            });
+
+            return response()->json([
+                'status'      => 'success',
+                'data'        => $formatted,
+                'total'       => $payments->total(),
+                'last_page'   => $payments->lastPage(),
+                'current_page'=> $payments->currentPage(),
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors du chargement de l’historique des reçus transport.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ─── AJOUT : génère un numéro de reçu unique, préfixé par
+     * établissement — même principe que les reçus de scolarité, mais avec
+     * le préfixe "TR-" pour distinguer immédiatement un reçu transport
+     * d'un reçu de scolarité lors d'un audit.
+     */
+    private static function generateTransportReceiptNumber(): string
+    {
+        $estabPrefix = current_establishment_prefix();
+        $year = date('Y');
+        $prefix = "TR-{$estabPrefix}-{$year}-";
+
+        $last = TransportPayment::whereRaw("receipt_number LIKE '{$prefix}%'")->latest('id')->first();
+        $next = $last ? ((int) substr($last->receipt_number, -5)) + 1 : 1;
+
+        return $prefix . str_pad($next, 5, '0', STR_PAD_LEFT);
+    }
+
+
+    /**
      * Récupère le grand livre de toutes les charges opérationnelles du parc automobile (Mois en cours).
      * URL: GET /api/vehicle-expenses
      */
     public function indexExpenses()
     {
         try {
-            // 1. Récupération des limites temporelles du mois pour le filtrage analytique
             $startOfMonth = Carbon::now()->startOfMonth()->format('Y-m-d');
             $endOfMonth = Carbon::now()->endOfMonth()->format('Y-m-d');
 
-            // 2. Extraction des dépenses avec les relations bus et créateur
             $expenses = VehicleExpense::with(['vehicle', 'creator'])
                 ->whereBetween('expense_date', [$startOfMonth, $endOfMonth])
                 ->orderBy('expense_date', 'desc')
                 ->orderBy('id', 'desc')
                 ->get();
 
-            // 3. Reformatage à plat pour simplifier l'intégration dans le tableau React
             $formatted = $expenses->map(function ($exp) {
                 return [
                     'id'                   => $exp->id,
-                    'title'                => $exp->title, // ex: Facture Gasoil 50 Litres
-                    'amount'               => (int) $exp->amount, // Forçage en entier pour le FCFA strict
-                    'category'             => $exp->category, // fuel, washing, repair, insurance, salary...
+                    'title'                => $exp->title,
+                    'amount'               => (int) $exp->amount,
+                    'category'             => $exp->category,
                     'expense_date'         => $exp->expense_date ? $exp->expense_date->format('Y-m-d') : null,
                     'description'          => $exp->description,
                     
-                    // Métadonnées du véhicule rattaché
                     'vehicle_id'           => $exp->vehicle_id,
                     'vehicle_name'         => $exp->vehicle ? $exp->vehicle->name : 'Bus inconnu',
                     'vehicle_registration' => $exp->vehicle ? $exp->vehicle->registration_number : 'N/A',
                     
-                    // Traçabilité de l'agent de saisie
                     'author_name'          => $exp->creator ? $exp->creator->name : 'Système',
                 ];
             });
@@ -1098,18 +1343,16 @@ class TransportController extends Controller
      */
     public function storeExpense(Request $request)
     {
-        // 1. Validation stricte du flux de sortie de caisse (Catégories du cahier des charges)
         $validated = $request->validate([
             'vehicle_id'   => ['required', 'exists:vehicles,id'],
             'title'        => ['required', 'string', 'max:150'],
-            'amount'       => ['required', 'integer', 'min:100'], // Minimum 100 FCFA
+            'amount'       => ['required', 'integer', 'min:100'],
             'category'     => ['required', 'in:fuel,washing,repair,insurance,salary,other'],
             'expense_date' => ['required', 'date'],
             'description'  => ['nullable', 'string'],
         ]);
 
         try {
-            // 2. Création de la ligne budgétaire de charge liée au transport
             $expense = VehicleExpense::create([
                 'vehicle_id'   => (int) $validated['vehicle_id'],
                 'title'        => trim($validated['title']),
@@ -1117,7 +1360,7 @@ class TransportController extends Controller
                 'category'     => $validated['category'],
                 'expense_date' => $validated['expense_date'],
                 'description'  => $validated['description'] ?? null,
-                'created_by'   => Auth::id() ?? null, // Traçabilité immédiate du caissier/comptable
+                'created_by'   => Auth::id() ?? null,
             ]);
 
             return response()->json([
@@ -1151,7 +1394,6 @@ class TransportController extends Controller
         try {
             $expense = VehicleExpense::findOrFail($id);
 
-            // 1. Validation stricte des données modifiées (FCFA strict entier positif)
             $validated = $request->validate([
                 'vehicle_id'   => ['required', 'exists:vehicles,id'],
                 'title'        => ['required', 'string', 'max:150'],
@@ -1161,7 +1403,6 @@ class TransportController extends Controller
                 'description'  => ['nullable', 'string'],
             ]);
 
-            // 2. Application de la mise à jour avec la syntaxe PHP native
             $expense->update([
                 'vehicle_id'   => (int) $validated['vehicle_id'],
                 'title'        => trim($validated['title']),
@@ -1203,10 +1444,8 @@ class TransportController extends Controller
     public function destroyExpense(string $id)
     {
         try {
-            // 1. Recherche de la ligne de dépense transport
             $expense = VehicleExpense::findOrFail($id);
 
-            // 2. Suppression physique du décaissement
             $expense->delete();
 
             return response()->json([
@@ -1226,6 +1465,194 @@ class TransportController extends Controller
                 'debug'   => $e->getMessage()
             ], 500);
         }
+    }
+
+
+    /**
+     * ─── AJOUT : Calcule toutes les sections du rapport financier
+     * Transport sur une période donnée — réutilisé par les 3 formats de
+     * sortie (JSON pour l'écran, PDF, Excel) pour ne jamais dupliquer la
+     * logique de calcul entre les trois.
+     */
+    private function computeTransportReportData(string $from, string $to): array
+    {
+        // ── A. Résumé financier de la période ──
+        $totalReceipts = (int) TransportPayment::whereBetween('payment_date', [$from, $to])->sum('amount_paid');
+
+        $expensesByCategory = VehicleExpense::whereBetween('expense_date', [$from, $to])
+            ->selectRaw('category, SUM(amount) as total')
+            ->groupBy('category')
+            ->pluck('total', 'category');
+
+        $categories = ['fuel', 'washing', 'repair', 'insurance', 'salary', 'other'];
+        $expenses = [];
+        $totalExpenses = 0;
+        foreach ($categories as $cat) {
+            $val = (int) ($expensesByCategory[$cat] ?? 0);
+            $expenses[$cat] = $val;
+            $totalExpenses += $val;
+        }
+
+        $netBalance = $totalReceipts - $totalExpenses;
+
+        $summary = [
+            'total_receipts' => $totalReceipts,
+            'expenses'       => $expenses,
+            'total_expenses' => $totalExpenses,
+            'net_balance'    => $netBalance,
+            'is_profit'      => $netBalance >= 0,
+            'coverage_rate'  => $totalExpenses > 0 ? round(($totalReceipts / $totalExpenses) * 100) : 100,
+        ];
+
+        // ── B. Rentabilité par véhicule ──
+        $vehicles = Vehicle::with('routes')->get()->map(function ($vehicle) use ($from, $to) {
+            $vehicleExpenses = (int) VehicleExpense::where('vehicle_id', $vehicle->id)
+                ->whereBetween('expense_date', [$from, $to])
+                ->sum('amount');
+
+            $routeIds = $vehicle->routes->pluck('id');
+
+            $vehicleRevenue = (int) TransportPayment::whereBetween('payment_date', [$from, $to])
+                ->whereHas('subscription', function ($q) use ($routeIds) {
+                    $q->whereIn('route_id', $routeIds);
+                })
+                ->sum('amount_paid');
+
+            $studentsCount = TransportSubscription::whereIn('route_id', $routeIds)
+                ->where('status', 'active')
+                ->count();
+
+            return [
+                'id'             => $vehicle->id,
+                'name'           => $vehicle->name,
+                'registration'   => $vehicle->registration_number,
+                'students_count' => $studentsCount,
+                'revenue'        => $vehicleRevenue,
+                'expenses'       => $vehicleExpenses,
+                'net'            => $vehicleRevenue - $vehicleExpenses,
+            ];
+        })->values();
+
+        // ── C. Taux de recouvrement — état actuel, pas lié à la période
+        // (une dette n'a pas de "fenêtre temporelle" propre, contrairement
+        // aux recettes/charges déjà encaissées/payées) ──
+        $allActive = TransportSubscription::where('status', 'active')->get();
+        $recovery = [
+            'paid_count'      => $allActive->where('payment_status', 'paid')->count(),
+            'partial_count'   => $allActive->where('payment_status', 'partial')->count(),
+            'unpaid_count'    => $allActive->where('payment_status', 'unpaid')->count(),
+            'total_due'       => (int) $allActive->sum('total_amount'),
+            'total_paid'      => (int) $allActive->sum('amount_paid'),
+            'total_remaining' => (int) $allActive->sum(fn($s) => max(0, $s->total_amount - $s->amount_paid)),
+        ];
+
+        // ── D. Évolution mensuelle — 6 derniers mois glissants jusqu'à $to ──
+        $monthlyTrend = [];
+        $cursor = \Carbon\Carbon::parse($to)->startOfMonth();
+        for ($i = 5; $i >= 0; $i--) {
+            $monthStart = $cursor->copy()->subMonths($i);
+            $monthEnd = $monthStart->copy()->endOfMonth();
+
+            $monthlyTrend[] = [
+                'label'    => ucfirst($monthStart->translatedFormat('M Y')),
+                'receipts' => (int) TransportPayment::whereBetween('payment_date', [$monthStart->format('Y-m-d'), $monthEnd->format('Y-m-d')])->sum('amount_paid'),
+                'expenses' => (int) VehicleExpense::whereBetween('expense_date', [$monthStart->format('Y-m-d'), $monthEnd->format('Y-m-d')])->sum('amount'),
+            ];
+        }
+
+        // ── E. Liste des impayés — état actuel, tous les élèves avec un
+        // solde restant, classés du plus gros débiteur au plus petit ──
+        $unpaidList = TransportSubscription::with(['student.classe', 'route'])
+            ->where('status', 'active')
+            ->whereColumn('amount_paid', '<', 'total_amount')
+            ->get()
+            ->map(function ($sub) {
+                $student = $sub->student;
+                return [
+                    'student_name' => $student ? "{$student->first_name} {$student->last_name}" : 'Élève inconnu',
+                    'matricule'    => $student->matricule ?? '—',
+                    'class_name'   => ($student && $student->classe) ? $student->classe->name : '—',
+                    'route_name'   => $sub->route->name ?? '—',
+                    'total_amount' => (int) $sub->total_amount,
+                    'amount_paid'  => (int) $sub->amount_paid,
+                    'remaining'    => (int) max(0, $sub->total_amount - $sub->amount_paid),
+                ];
+            })
+            ->sortByDesc('remaining')
+            ->values();
+
+        return [
+            'period'        => ['from' => $from, 'to' => $to],
+            'summary'       => $summary,
+            'vehicles'      => $vehicles,
+            'recovery'      => $recovery,
+            'monthly_trend' => $monthlyTrend,
+            'unpaid_list'   => $unpaidList,
+        ];
+    }
+
+    /**
+     * ─── AJOUT : Rapport financier Transport — vue JSON pour l'écran.
+     * URL: GET /api/transport/reports?from=...&to=...
+     */
+    public function financialReport(Request $request)
+    {
+        $validated = $request->validate([
+            'from' => ['required', 'date'],
+            'to'   => ['required', 'date', 'after_or_equal:from'],
+        ]);
+
+        try {
+            $data = $this->computeTransportReportData($validated['from'], $validated['to']);
+            return response()->json(['status' => 'success', 'data' => $data], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Erreur lors de la génération du rapport.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ─── AJOUT : Rapport financier Transport — export PDF.
+     * URL: GET /api/transport/reports/pdf?from=...&to=...
+     */
+    public function financialReportPdf(Request $request)
+    {
+        $validated = $request->validate([
+            'from' => ['required', 'date'],
+            'to'   => ['required', 'date', 'after_or_equal:from'],
+        ]);
+
+        $data = $this->computeTransportReportData($validated['from'], $validated['to']);
+        $establishment = \App\Models\Establishment::find(current_establishment_id());
+
+        $pdf = Pdf::loadView('pdf.transport-report-pdf', [
+            'data'              => $data,
+            'establishmentName' => $establishment->name ?? 'Établissement scolaire',
+        ]);
+
+        return $pdf->stream('rapport-transport-' . $validated['from'] . '-au-' . $validated['to'] . '.pdf');
+    }
+
+    /**
+     * ─── AJOUT : Rapport financier Transport — export Excel (4 onglets).
+     * URL: GET /api/transport/reports/excel?from=...&to=...
+     */
+    public function financialReportExcel(Request $request)
+    {
+        $validated = $request->validate([
+            'from' => ['required', 'date'],
+            'to'   => ['required', 'date', 'after_or_equal:from'],
+        ]);
+
+        $data = $this->computeTransportReportData($validated['from'], $validated['to']);
+
+        return Excel::download(
+            new TransportReportExport($data),
+            'rapport-transport-' . $validated['from'] . '-au-' . $validated['to'] . '.xlsx'
+        );
     }
 
 

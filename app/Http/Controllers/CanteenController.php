@@ -59,6 +59,23 @@ class CanteenController extends Controller
         $netBalance = $monthlyReceiptsInt - $monthlyExpensesInt; 
         $isProfit = $netBalance >= 0;
 
+        // ── AJOUT : alertes de stock faible ────────────────────────────────
+        // Le frontend (CanteenDashboardPage.jsx) attend cette clé pour
+        // afficher sa bannière d'alerte rouge, mais elle n'était jamais
+        // calculée ici — la bannière ne s'affichait donc jamais, même en
+        // cas de rupture réelle. On compte les denrées dont le stock
+        // actuel est descendu au niveau ou en dessous de leur seuil
+        // d'alerte configuré.
+        $lowStockAlerts = CanteenProduct::whereColumn('current_stock', '<=', 'alert_threshold')->count();
+
+        // ── AJOUT : taux de fréquentation du jour ────────────────────────────
+        // Repas servis aujourd'hui rapporté au nombre d'abonnés actifs —
+        // le state React prévoyait déjà cette clé (attendance_rate) sans
+        // jamais la recevoir du backend.
+        $attendanceRate = $totalSubscribers > 0
+            ? (int) round(($mealsServedToday / $totalSubscribers) * 100)
+            : 0;
+
         // 5. Envoi de la réponse structurée avec TOUTES les clés attendues par le Dashboard
         return response()->json([
             'total_subscribers'  => (int) $totalSubscribers,
@@ -68,7 +85,11 @@ class CanteenController extends Controller
             
             // AJOUT DES CLÉS COMPTABLES MANQUANTES POUR REACT :
             'net_balance'        => (int) $netBalance,
-            'is_profit'          => (bool) $isProfit
+            'is_profit'          => (bool) $isProfit,
+
+            // AJOUT DES CLÉS D'ALERTE / FRÉQUENTATION MANQUANTES POUR REACT :
+            'low_stock_alerts'   => (int) $lowStockAlerts,
+            'attendance_rate'    => $attendanceRate,
         ], 200);
 
     } catch (\Exception $e) {
@@ -1235,7 +1256,26 @@ class CanteenController extends Controller
                 ->orderBy('created_at', 'desc')
                 ->get();
 
-            return response()->json($movements, 200);
+            // ─── CORRECTIF : les modèles bruts étaient renvoyés tels
+            // quels, donc movement_date sortait en ISO complet
+            // ("2026-08-15T00:00:00.000000Z") au lieu d'une simple date —
+            // le frontend l'affichait donc brut, avec un "00:00" trompeur
+            // pour un champ qui n'a jamais eu d'heure. Reformaté comme le
+            // reste des endpoints du contrôleur (Y-m-d), avec la relation
+            // produit aplatie pour un mapping simple côté React.
+            $formatted = $movements->map(function ($m) {
+                return [
+                    'id'             => $m->id,
+                    'type'           => $m->type, // in / out
+                    'quantity'       => (int) $m->quantity,
+                    'reason'         => $m->reason,
+                    'movement_date'  => $m->movement_date ? $m->movement_date->format('Y-m-d') : null,
+                    'product_name'   => $m->product ? $m->product->name : 'Produit supprimé',
+                    'product_unit'   => $m->product ? $m->product->unit : '',
+                ];
+            });
+
+            return response()->json($formatted, 200);
 
         } catch (\Exception $e) {
             return response()->json([

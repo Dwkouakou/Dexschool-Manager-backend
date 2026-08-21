@@ -26,6 +26,12 @@ class AffiliatedEstablishmentController extends Controller
             'code'     => $establishment->code,
             'is_home'  => $establishment->id === $user->establishment_id,
             'is_root'  => is_null($establishment->parent_establishment_id) && $establishment->child_quota > 0,
+            // ─── AJOUT : indique si l'utilisateur a réellement un rôle actif
+            // sur CET établissement précis — permet au frontend de masquer
+            // l'onglet des établissements où il n'a strictement aucun accès
+            // (sinon l'onglet reste affiché même si tous les boutons de la
+            // Sidebar sont vides une fois dessus).
+            'has_role' => $this->hasActiveRoleIn($user, $establishment->id),
         ];
     }
 
@@ -91,9 +97,17 @@ class AffiliatedEstablishmentController extends Controller
 
         $accessible = $groupEstablishments->whereIn('id', $accessibleIds)->values();
 
-        // Sécurité : l'établissement d'origine reste toujours listé, même
-        // dans un cas limite où aucun rôle n'y serait formellement trouvé.
-        if (!$accessible->contains('id', $home->id)) {
+        // Sécurité : uniquement si l'utilisateur n'a RÉELLEMENT aucun rôle
+        // nulle part dans tout le groupe (cas limite, ne devrait jamais
+        // arriver en pratique) — on force son établissement d'origine à
+        // apparaître pour éviter une liste vide qui casserait l'interface.
+        // ─── CORRECTIF : condition resserrée à `isEmpty()` plutôt que
+        // `!contains('id', $home->id)`. L'ancienne condition forçait
+        // l'origine dans la liste dès qu'elle n'y était pas DÉJÀ, même si
+        // la personne avait un rôle bien réel ailleurs dans le groupe —
+        // créant un onglet fantôme vers un établissement où elle n'a
+        // strictement aucun accès.
+        if ($accessible->isEmpty()) {
             $accessible->push($home);
         }
 

@@ -6,6 +6,7 @@ use App\Models\Academic\AcademicYears;
 use App\Models\Academic\Student;
 use App\Models\Concerns\BelongsToActiveYear;
 use App\Models\Concerns\BelongsToEstablishment;
+use App\Models\Transport\TransportPayment;
 use App\Models\Transport\TransportRoute;
 use Illuminate\Database\Eloquent\Model;
 
@@ -20,4 +21,12 @@ class TransportSubscription extends Model
     public function student() { return $this->belongsTo(Student::class); }
     public function route() { return $this->belongsTo(TransportRoute::class, 'route_id'); }
     public function academicYear() { return $this->belongsTo(AcademicYears::class, 'academic_year_id'); }
+
+    // ─── AJOUT : journal détaillé des versements de cet abonnement,
+    // chaque versement étant sa propre ligne traçable (montant, date,
+    // numéro de reçu) au lieu d'un simple total cumulé sans détail.
+    public function payments()
+    {
+        return $this->hasMany(TransportPayment::class, 'subscription_id')->orderBy('payment_date')->orderBy('id');
+    }
 }

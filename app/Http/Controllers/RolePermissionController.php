@@ -229,6 +229,90 @@ class RolePermissionController extends Controller
     }
 
     /**
+     * Duplique un rôle de l'établissement courant vers un AUTRE établissement
+     * du même groupe scolaire — copie le nom, la description et les
+     * permissions cochées, mais crée une ligne totalement INDÉPENDANTE :
+     * modifier l'original par la suite n'affecte jamais la copie, et
+     * inversement. La copie reste ensuite librement modifiable (cases à
+     * cocher comprises) exactement comme n'importe quel autre rôle créé
+     * manuellement.
+     * POST /api/roles/{id}/duplicate
+     */
+    public function duplicate(Request $request, string $id)
+    {
+        $establishmentId = current_establishment_id();
+
+        $sourceRole = Role::where('establishment_id', $establishmentId)
+            ->with('permissions')
+            ->findOrFail($id);
+
+        $validated = $request->validate([
+            'target_establishment_id' => ['required', 'integer', 'exists:establishments,id'],
+        ]);
+
+        $targetId = $validated['target_establishment_id'];
+
+        if ($targetId === $establishmentId) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Choisissez un établissement différent de celui-ci pour dupliquer le rôle.",
+            ], 422);
+        }
+
+        // ─── Sécurité : l'établissement cible doit appartenir au MÊME
+        // groupe scolaire que l'établissement courant — impossible de
+        // dupliquer un rôle vers un établissement complètement étranger
+        // (un autre client de la plateforme, par exemple).
+        $current = \App\Models\Establishment::findOrFail($establishmentId);
+        $rootId  = $current->parent_establishment_id ?? $current->id;
+
+        $targetInGroup = \App\Models\Establishment::where('id', $targetId)
+            ->where(function ($q) use ($rootId) {
+                $q->where('id', $rootId)->orWhere('parent_establishment_id', $rootId);
+            })
+            ->exists();
+
+        if (!$targetInGroup) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cet établissement ne fait pas partie du même groupe scolaire.",
+            ], 403);
+        }
+
+        $exists = Role::where('establishment_id', $targetId)
+            ->where('name', $sourceRole->name)
+            ->exists();
+
+        if ($exists) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Un rôle porte déjà ce nom dans l'établissement cible.",
+            ], 422);
+        }
+
+        $newRole = new Role([
+            'name'       => $sourceRole->name,
+            'guard_name' => 'web',
+        ]);
+        $newRole->establishment_id = $targetId;
+        $newRole->slug             = \Illuminate\Support\Str::slug($sourceRole->name) . '-' . uniqid();
+        $newRole->description      = $sourceRole->description;
+        $newRole->is_system        = false; // Toujours modifiable, même si l'original était un rôle système
+        $newRole->is_locked        = false;
+        $newRole->save();
+
+        $newRole->syncPermissions($sourceRole->permissions);
+
+        $targetEstablishment = \App\Models\Establishment::find($targetId);
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => "Rôle \"{$sourceRole->name}\" dupliqué avec succès vers \"{$targetEstablishment->name}\" ({$newRole->permissions->count()} permission(s) copiée(s)).",
+            'role'    => $newRole->load('permissions'),
+        ], 201);
+    }
+
+    /**
      * Suppression d'un rôle — interdite pour les rôles système/verrouillés.
      * Si des utilisateurs portent encore ce rôle, il leur est d'abord
      * automatiquement RÉVOQUÉ (retiré) avant la suppression définitive —
