@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Academic\AcademicYears;
 use App\Models\Canteen\CanteenAttendance;
+use App\Models\Canteen\CanteenAttendanceSheet;
 use App\Models\Canteen\CanteenExpense;
+use App\Models\Canteen\CanteenPayment;
 use App\Models\Canteen\CanteenProduct;
 use App\Models\Canteen\CanteenStockMovement;
 use App\Models\Canteen\CanteenSubscription;
@@ -16,10 +18,40 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Maatwebsite\Excel\Facades\Excel;
+use App\Exports\CanteenReportExport;
 
 class CanteenController extends Controller
 {
     //
+
+    /**
+     * Génère un numéro de reçu séquentiel et unique pour un versement de
+     * cantine — format CT-{préfixe établissement}-{année}-{numéro sur 5
+     * chiffres}, ex: CT-DSM-2026-00001.
+     *
+     * DOIT être appelée à l'intérieur d'une DB::transaction() englobant
+     * aussi l'insertion du CanteenPayment : le lockForUpdate() verrouille
+     * les lignes déjà comptées jusqu'au commit, ce qui empêche deux
+     * caissiers encaissant au même instant de se voir attribuer le même
+     * numéro de reçu.
+     */
+    private function generateCanteenReceiptNumber(string $paymentDate): string
+    {
+        $prefix = current_establishment_prefix();
+        $establishmentId = current_establishment_id();
+        $year = \Illuminate\Support\Carbon::parse($paymentDate)->format('Y');
+
+        $count = CanteenPayment::withoutGlobalScopes()
+            ->where('establishment_id', $establishmentId)
+            ->whereYear('payment_date', $year)
+            ->lockForUpdate()
+            ->count();
+
+        $sequence = str_pad((string) ($count + 1), 5, '0', STR_PAD_LEFT);
+
+        return "CT-{$prefix}-{$year}-{$sequence}";
+    }
 
         /**
      * Récupère les métriques globales et financières du tableau de bord de la cantine.
@@ -43,9 +75,17 @@ class CanteenController extends Controller
             ->where('present', 1)
             ->count();
 
-        // 3. Recettes de la cantine pour le mois en cours (Total des acomptes et tranches perçus en FCFA)
-        $monthlyReceipts = CanteenSubscription::whereBetween('created_at', [$startOfMonth . ' 00:00:00', $endOfMonth . ' 23:59:59'])
-            ->sum('amount_paid');
+        // 3. Recettes de la cantine pour le mois en cours (Total des VERSEMENTS
+        // réellement encaissés ce mois-ci, en FCFA)
+        // ─── CORRECTIF : mesurait auparavant les abonnements CRÉÉS ce
+        // mois-ci (whereBetween sur created_at de CanteenSubscription),
+        // pas les versements ENCAISSÉS ce mois-ci. Un abonnement créé en
+        // juillet et soldé en septembre voyait tout son montant compté
+        // sur juillet, jamais sur septembre. Maintenant basé sur le vrai
+        // registre de versements CanteenPayment et sa date réelle
+        // d'encaissement (payment_date).
+        $monthlyReceipts = CanteenPayment::whereBetween('payment_date', [$startOfMonth, $endOfMonth])
+            ->sum('amount');
 
         // 4. Dépenses de marché pour le mois en cours (Achat de nourriture, gaz, charbon en FCFA)
         $monthlyExpenses = CanteenExpense::whereBetween('expense_date', [$startOfMonth, $endOfMonth])
@@ -142,6 +182,7 @@ class CanteenController extends Controller
      */
     public function storeMealType(Request $request)
     {
+        assert_writable_year(); // ─── AJOUT : bloque en consultation d'année archivée, comme le reste du module
         // 1. Validation stricte du forfait (Prix obligatoirement entier positif pour le FCFA)
         $validated = $request->validate([
             'name'            => ['required', 'string', 'max:100'],
@@ -185,6 +226,7 @@ class CanteenController extends Controller
      */
     public function updateMealType(Request $request, string $id)
     {
+        assert_writable_year(); // ─── AJOUT : bloque en consultation d'année archivée
         try {
             $mealType = MealType::findOrFail($id);
 
@@ -234,6 +276,7 @@ class CanteenController extends Controller
      */
     public function destroyMealType(string $id)
     {
+        assert_writable_year(); // ─── AJOUT : bloque en consultation d'année archivée
         try {
             $mealType = MealType::withCount('subscriptions')->findOrFail($id);
 
@@ -383,25 +426,65 @@ class CanteenController extends Controller
                 $paymentStatus = 'unpaid';  // Aucun versement de départ
             }
 
-            // 5. Insertion en base de données
-            $subscription = CanteenSubscription::create([
-                'student_id'       => $validated['student_id'],
-                'academic_year_id' => $activeYearId,
-                'meal_type_id'     => $validated['meal_type_id'],
-                'start_date'       => $validated['start_date'],
-                'end_date'         => $validated['end_date'],
-                'total_amount'     => $total,
-                'amount_paid'      => $paid,
-                'status'           => 'active', // Actif d'office à la création
-                'payment_status'   => $paymentStatus,
-                'notes'            => $validated['notes'] ?? null,
-            ]);
+            // 5. Insertion en base de données, avec traçabilité de l'acompte
+            // initial dans le registre de versements si un montant a été
+            // encaissé dès la création (sinon cet acompte n'apparaissait
+            // jamais dans le Cumul ni dans l'historique des reçus, seul
+            // amount_paid était mis à jour — c'est exactement l'écart
+            // observé entre le total payé affiché et le cumul détaillé).
+            return DB::transaction(function () use ($validated, $activeYearId, $total, $paid, $paymentStatus) {
+                $subscription = CanteenSubscription::create([
+                    'student_id'       => $validated['student_id'],
+                    'academic_year_id' => $activeYearId,
+                    'meal_type_id'     => $validated['meal_type_id'],
+                    'start_date'       => $validated['start_date'],
+                    'end_date'         => $validated['end_date'],
+                    // ─── AJOUT : initialisée à start_date à la création,
+                    // sera mise à jour à chaque renouvellement pour
+                    // toujours refléter le début de la période EN COURS
+                    'current_period_start' => $validated['start_date'],
+                    'total_amount'     => $total,
+                    'amount_paid'      => $paid,
+                    'status'           => 'active', // Actif d'office à la création
+                    'payment_status'   => $paymentStatus,
+                    'notes'            => $validated['notes'] ?? null,
+                ]);
 
-            return response()->json([
-                'status'  => 'success',
-                'message' => "L'élève a été inscrit avec succès au service de restauration.",
-                'subscription' => $subscription
-            ], 201);
+                if ($paid > 0) {
+                    $paymentDate = now()->format('Y-m-d');
+                    $receiptNumber = $this->generateCanteenReceiptNumber($paymentDate);
+
+                    $payment = CanteenPayment::create([
+                        'canteen_subscription_id' => $subscription->id,
+                        'amount'                  => $paid,
+                        // ─── AJOUT : reste à payer figé juste après cet
+                        // acompte initial (0 si l'abonnement est soldé
+                        // dès la création)
+                        'remaining_after'         => max(0, $total - $paid),
+                        'payment_date'            => $paymentDate,
+                        // ─── AJOUT : l'acompte initial couvre toujours la
+                        // période de l'abonnement telle que définie à la
+                        // création (start_date → end_date), pas la date
+                        // d'encaissement
+                        'period_covered'          => $validated['start_date'],
+                        'period_end'              => $validated['end_date'],
+                        'type'                    => 'payment',
+                        'receipt_number'          => $receiptNumber,
+                        'collected_by'            => Auth::id() ?? null,
+                    ]);
+                }
+
+                return response()->json([
+                    'status'  => 'success',
+                    'message' => "L'élève a été inscrit avec succès au service de restauration.",
+                    'subscription' => $subscription,
+                    // ─── AJOUT : permet au frontend de proposer
+                    // l'impression immédiate du reçu, comme pour un
+                    // versement classique ou un renouvellement ───
+                    'receipt_id'     => $payment->id ?? null,
+                    'receipt_number' => $payment->receipt_number ?? null,
+                ], 201);
+            });
 
         } catch (\Exception $e) {
             return response()->json([
@@ -425,6 +508,11 @@ class CanteenController extends Controller
                 'mealType', 
                 'attendances' => function ($query) {
                     $query->orderBy('attendance_date', 'desc'); // Du repas le plus récent au plus ancien
+                },
+                // ─── AJOUT : historique des versements/renouvellements
+                // pour alimenter le bouton "Cumul" du tableau ───
+                'payments' => function ($query) {
+                    $query->orderBy('payment_date', 'desc');
                 }
             ])->findOrFail($id);
 
@@ -470,7 +558,21 @@ class CanteenController extends Controller
                         'present'         => (bool) $att->present, // true = a mangé, false = absent
                         'notes'           => $att->notes,
                     ];
-                })
+                }),
+
+                // ─── AJOUT : historique des versements et renouvellements
+                // — c'est le "cumul" affiché via le bouton dédié du tableau
+                'payments' => $subscription->payments->map(function ($p) {
+                    return [
+                        'id'              => $p->id,
+                        'receipt_number'  => $p->receipt_number,
+                        'type'            => $p->type, // payment / renewal
+                        'amount'          => (int) $p->amount,
+                        'payment_date'    => $p->payment_date ? $p->payment_date->format('Y-m-d') : null,
+                        'period_covered'  => $p->period_covered ? $p->period_covered->format('Y-m-d') : null,
+                        'period_end'      => $p->period_end ? $p->period_end->format('Y-m-d') : null,
+                    ];
+                }),
             ];
 
             return response()->json([
@@ -494,8 +596,16 @@ class CanteenController extends Controller
 
 
     /**
-     * Modifie les dates, le forfait ou le statut de l'abonnement de cantine d'un élève.
+     * Modifie le statut ou les notes de l'abonnement de cantine d'un élève.
      * URL : PUT /api/canteen-subscriptions/{id}
+     *
+     * ─── RESTREINT VOLONTAIREMENT : cette route ne modifie plus que
+     * status et notes. Le forfait, les dates et le montant total ne
+     * passent plus que par renewSubscription() — permettre de les
+     * modifier ici aussi créait une voie de contournement qui
+     * court-circuitait toute la logique métier du renouvellement (pas de
+     * reçu généré, pas de vérification que la période en cours est
+     * soldée, pas de calcul automatique du nouveau total).
      */
     public function updateSubscription(Request $request, string $id)
     {
@@ -503,37 +613,16 @@ class CanteenController extends Controller
         try {
             $subscription = CanteenSubscription::findOrFail($id);
 
-            // 1. Validation stricte des données modifiées
+            // 1. Validation stricte — uniquement statut et notes
             $validated = $request->validate([
-                'meal_type_id' => ['required', 'exists:meal_types,id'],
-                'start_date'   => ['required', 'date'],
-                'end_date'     => ['required', 'date', 'after_or_equal:start_date'],
-                'total_amount' => ['required', 'integer', 'min:0'],
-                'status'       => ['required', 'in:active,inactive,suspended'], // active = Actif, suspended = Suspendu (ex: maladie)
-                'notes'        => ['nullable', 'string'],
+                'status' => ['required', 'in:active,inactive,suspended'], // active = Actif, suspended = Suspendu (ex: maladie)
+                'notes'  => ['nullable', 'string'],
             ]);
 
-            // 2. Recalcul dynamique du statut de paiement en FCFA
-            $total = (int) $validated['total_amount'];
-            $paid  = (int) $subscription->amount_paid; // On conserve l'argent déjà versé par le parent
-
-            if ($paid >= $total) {
-                $paymentStatus = 'paid';
-            } elseif ($paid > 0 && $paid < $total) {
-                $paymentStatus = 'partial';
-            } else {
-                $paymentStatus = 'unpaid';
-            }
-
-            // 3. Mise à jour de l'enregistrement en base de données
+            // 2. Mise à jour de l'enregistrement en base de données
             $subscription->update([
-                'meal_type_id'   => $validated['meal_type_id'],
-                'start_date'     => $validated['start_date'],
-                'end_date'       => $validated['end_date'],
-                'total_amount'   => $total,
-                'status'         => $validated['status'],
-                'payment_status' => $paymentStatus,
-                'notes'          => $validated['notes'] ?? null,
+                'status' => $validated['status'],
+                'notes'  => $validated['notes'] ?? null,
             ]);
 
             return response()->json([
@@ -577,6 +666,21 @@ class CanteenController extends Controller
                 return response()->json([
                     'status'  => 'error',
                     'message' => "Impossible de supprimer définitivement cet abonnement car un versement de " . number_format($subscription->amount_paid, 0, '', ' ') . " FCFA a déjà été encaissé en caisse. Veuillez plutôt modifier le statut de l'élève en 'Inactif'."
+                ], 422);
+            }
+
+            // ─── AJOUT : VERROU DE TRAÇABILITÉ — un abonnement à 0 FCFA
+            // payé peut quand même avoir été pointé à l'appel du
+            // réfectoire, y compris sur des feuilles d'appel déjà
+            // verrouillées. Le supprimer effacerait cet historique en
+            // cascade (canteen_attendances.subscription_id est en
+            // cascadeOnDelete), ce qui contredit le principe "aucun
+            // delete définitif important" du projet.
+            $attendanceCount = \App\Models\Canteen\CanteenAttendance::where('subscription_id', $subscription->id)->count();
+            if ($attendanceCount > 0) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "Impossible de supprimer cet abonnement car il possède un historique de présence à l'appel ({$attendanceCount} pointage(s) enregistré(s)), même sans versement associé. Veuillez plutôt modifier le statut de l'élève en 'Inactif' pour conserver la traçabilité."
                 ], 422);
             }
 
@@ -651,9 +755,40 @@ class CanteenController extends Controller
                     'payment_status' => $paymentStatus
                 ]);
 
+                // ─── AJOUT : enregistrement du versement dans le vrai
+                // registre CanteenPayment, avec reçu numéroté — jusqu'ici
+                // seul amount_paid était incrémenté, aucune trace
+                // individuelle du versement n'existait (pas d'historique,
+                // pas de reçu imprimable, calcul des recettes mensuelles
+                // impossible à faire correctement).
+                $paymentDate = now()->format('Y-m-d');
+                $receiptNumber = $this->generateCanteenReceiptNumber($paymentDate);
+
+                $payment = CanteenPayment::create([
+                    'canteen_subscription_id' => $subscription->id,
+                    'amount'                  => $newAmount,
+                    // ─── AJOUT : reste à payer figé juste après ce
+                    // versement — 0 si l'abonnement devient soldé ici
+                    'remaining_after'         => max(0, $totalDue - $updatedPaid),
+                    'payment_date'            => $paymentDate,
+                    // ─── CORRECTIF : utilise current_period_start (mis à
+                    // jour à chaque renouvellement) au lieu de start_date
+                    // (fixé une fois pour toutes à la création et jamais
+                    // modifié) — sinon tout versement fait après un
+                    // renouvellement retombait sur la toute première
+                    // période de l'abonnement, jamais la période active.
+                    'period_covered'          => $subscription->current_period_start ?? $subscription->start_date,
+                    'period_end'              => $subscription->end_date,
+                    'type'                    => 'payment',
+                    'receipt_number'          => $receiptNumber,
+                    'collected_by'            => Auth::id() ?? null,
+                ]);
+
                 return response()->json([
                     'status'  => 'success',
-                    'message' => "Versement de " . number_format($newAmount, 0, '', ' ') . " FCFA enregistré avec succès. Le compte cantine de l'élève est actualisé."
+                    'message' => "Versement de " . number_format($newAmount, 0, '', ' ') . " FCFA enregistré avec succès. Le compte cantine de l'élève est actualisé.",
+                    'receipt_id'     => $payment->id,
+                    'receipt_number' => $receiptNumber,
                 ], 200);
             });
 
@@ -688,17 +823,20 @@ class CanteenController extends Controller
     {
         assert_writable_year();
 
-        // 1. Validation : uniquement le prix DE CETTE NOUVELLE PÉRIODE,
-        // jamais un total cumulé — c'est le backend qui fait l'addition.
+        // 1. Validation : le forfait est désormais choisi via une liste
+        // (jamais un prix tapé librement — le tarif est TOUJOURS dérivé
+        // du forfait sélectionné, calculé ici côté serveur, jamais fait
+        // confiance à une valeur envoyée par le client).
         $validated = $request->validate([
-            'period_amount' => ['required', 'integer', 'min:0'],   // Prix de la nouvelle période (ex: 20000)
-            'new_end_date'  => ['required', 'date'],                // Nouvelle date de fin de couverture
-            'payment_now'   => ['nullable', 'integer', 'min:0'],    // Versement immédiat optionnel pour cette période
+            'meal_type_id'  => ['required', 'exists:meal_types,id'],   // Forfait de la nouvelle période
+            'new_end_date'  => ['required', 'date'],                    // Nouvelle date de fin de couverture
+            'payment_now'   => ['nullable', 'integer', 'min:0'],        // Versement immédiat optionnel pour cette période
             'notes'         => ['nullable', 'string'],
         ]);
 
         try {
             $subscription = CanteenSubscription::findOrFail($id);
+            $mealType = \App\Models\Canteen\MealType::findOrFail($validated['meal_type_id']);
 
             // ─── VERROU : impossible de renouveler tant que la période en
             // cours n'est pas entièrement soldée — vérifié aussi côté
@@ -718,8 +856,18 @@ class CanteenController extends Controller
                 ], 422);
             }
 
-            return DB::transaction(function () use ($subscription, $validated) {
-                $periodAmount = (int) $validated['period_amount'];
+            return DB::transaction(function () use ($subscription, $mealType, $validated) {
+                // ─── AJOUT : capturé AVANT la mise à jour de l'abonnement
+                // — c'est le point de départ de la nouvelle période
+                // couverte par ce renouvellement (le lendemain de
+                // l'ancienne date de fin), pas la date d'aujourd'hui.
+                $newPeriodStart = $subscription->end_date->copy()->addDay()->format('Y-m-d');
+
+                // ─── Le tarif de la nouvelle période vient TOUJOURS du
+                // forfait choisi, jamais d'un champ libre — empêche toute
+                // manipulation du prix, que ce soit par erreur de saisie
+                // ou par une requête API construite à la main.
+                $periodAmount = (int) $mealType->price_per_month;
                 $paymentNow   = (int) ($validated['payment_now'] ?? 0);
 
                 // ─── L'AJOUT, pas un total ressaisi : le total existant
@@ -740,18 +888,56 @@ class CanteenController extends Controller
                     : ($newPaid > 0 ? 'partial' : 'unpaid');
 
                 $subscription->update([
-                    'end_date'       => $validated['new_end_date'],
-                    'total_amount'   => $newTotal,
-                    'amount_paid'    => $newPaid,
-                    'payment_status' => $paymentStatus,
-                    'status'         => 'active',
-                    'notes'          => $validated['notes'] ?? $subscription->notes,
+                    'meal_type_id'          => $mealType->id, // ─── AJOUT : permet de changer de forfait au renouvellement
+                    'end_date'              => $validated['new_end_date'],
+                    // ─── AJOUT : fait avancer le marqueur de "période en
+                    // cours" — c'est ce qui permet aux versements
+                    // classiques suivants (guichet) de s'attribuer à la
+                    // BONNE période, pas à la date de création originale.
+                    'current_period_start'  => $newPeriodStart,
+                    'total_amount'          => $newTotal,
+                    'amount_paid'           => $newPaid,
+                    'payment_status'        => $paymentStatus,
+                    'status'                => 'active',
+                    'notes'                 => $validated['notes'] ?? $subscription->notes,
                 ]);
+
+                // ─── AJOUT : si un versement immédiat accompagne le
+                // renouvellement, on l'enregistre dans le registre
+                // CanteenPayment (type 'renewal') avec son propre reçu
+                // numéroté — même logique que pour un versement classique.
+                $receiptNumber = null;
+                if ($paymentNow > 0) {
+                    $paymentDate = now()->format('Y-m-d');
+                    $receiptNumber = $this->generateCanteenReceiptNumber($paymentDate);
+
+                    CanteenPayment::create([
+                        'canteen_subscription_id' => $subscription->id,
+                        'amount'                  => $paymentNow,
+                        // ─── AJOUT : reste à payer figé juste après ce
+                        // versement de renouvellement
+                        'remaining_after'         => max(0, $newTotal - $newPaid),
+                        'payment_date'            => $paymentDate,
+                        // ─── AJOUT : ce versement couvre la NOUVELLE
+                        // période (dès le lendemain de l'ancienne fin
+                        // jusqu'à la nouvelle date de fin CHOISIE ICI),
+                        // pas le jour où le renouvellement est encaissé —
+                        // et fige cette plage même si un futur
+                        // renouvellement déplace encore la date de fin de
+                        // l'abonnement plus tard.
+                        'period_covered'          => $newPeriodStart,
+                        'period_end'              => $validated['new_end_date'],
+                        'type'                    => 'renewal',
+                        'receipt_number'          => $receiptNumber,
+                        'collected_by'            => Auth::id() ?? null,
+                    ]);
+                }
 
                 return response()->json([
                     'status'  => 'success',
                     'message' => "Abonnement renouvelé jusqu'au " . \Illuminate\Support\Carbon::parse($validated['new_end_date'])->format('d/m/Y') . ". Période ajoutée : " . number_format($periodAmount, 0, '', ' ') . " FCFA.",
                     'subscription' => $subscription->fresh(),
+                    'receipt_number' => $receiptNumber,
                 ], 200);
             });
 
@@ -781,6 +967,14 @@ class CanteenController extends Controller
         try {
             // 1. Déterminer la date cible de l'appel (prend la date du jour si non fournie)
             $date = $request->query('date') ?? Carbon::today()->format('Y-m-d');
+
+            // ─── AJOUT : vérifie si l'appel de ce jour a déjà été
+            // enregistré et verrouillé — le frontend doit alors passer en
+            // lecture seule avec un message clair, plutôt que de laisser
+            // croire qu'une nouvelle saisie est possible.
+            $sheet = CanteenAttendanceSheet::with('submitter')
+                ->where('attendance_date', $date)
+                ->first();
 
             // 2. Récupérer tous les abonnements cantine actifs couvrant cette date
             $subscriptions = CanteenSubscription::with(['student.classe', 'mealType'])
@@ -817,7 +1011,14 @@ class CanteenController extends Controller
                 ];
             });
 
-            return response()->json($formatted, 200);
+            // ─── AJOUT : réponse structurée avec l'état de verrouillage,
+            // au lieu d'un simple tableau brut de présences.
+            return response()->json([
+                'locked'         => (bool) $sheet,
+                'submitted_by'   => $sheet && $sheet->submitter ? $sheet->submitter->name : null,
+                'submitted_at'   => $sheet ? $sheet->submitted_at->format('d/m/Y à H:i') : null,
+                'records'        => $formatted,
+            ], 200);
 
         } catch (\Exception $e) {
             return response()->json([
@@ -848,14 +1049,30 @@ class CanteenController extends Controller
         try {
             $date = $validated['attendance_date'];
 
+            // ─── AJOUT : verrou de traçabilité — refuse catégoriquement
+            // tout nouvel enregistrement si l'appel de ce jour a déjà été
+            // validé. Avant ce correctif, un second "Enregistrer" sur le
+            // même jour écrasait silencieusement la première saisie, sans
+            // aucune trace de qui avait pointé quoi ni quand.
+            $existingSheet = CanteenAttendanceSheet::with('submitter')
+                ->where('attendance_date', $date)
+                ->first();
+
+            if ($existingSheet) {
+                $submitterName = $existingSheet->submitter->name ?? 'un agent';
+                $submittedAt = $existingSheet->submitted_at->format('d/m/Y à H:i');
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "Cet appel a déjà été enregistré et verrouillé par {$submitterName} le {$submittedAt}. Il ne peut plus être modifié."
+                ], 422);
+            }
+
             // 2. Traitement groupé et sécurisé dans une transaction de base de données
             DB::transaction(function () use ($validated, $date) {
                 foreach ($validated['records'] as $record) {
                     // Conversion saine du booléen/entier pour MySQL
                     $isPresent = filter_var($record['present'], FILTER_VALIDATE_BOOLEAN) ? 1 : 0;
 
-                    // updateOrCreate vérifie si le couple (date, élève) existe déjà.
-                    // Si oui, il met à jour la présence. Si non, il crée une nouvelle ligne.
                     CanteenAttendance::updateOrCreate(
                         [
                             'subscription_id' => $record['subscription_id'],
@@ -867,11 +1084,19 @@ class CanteenController extends Controller
                         ]
                     );
                 }
+
+                // ─── AJOUT : pose le verrou définitif pour cette date,
+                // avec l'auteur et l'horodatage exact de la validation.
+                CanteenAttendanceSheet::create([
+                    'attendance_date' => $date,
+                    'submitted_by'    => Auth::id() ?? null,
+                    'submitted_at'    => now(),
+                ]);
             });
 
             return response()->json([
                 'status'  => 'success',
-                'message' => "La feuille d'appel du réfectoire pour le " . \Illuminate\Support\Carbon::parse($date)->format('d/m/Y') . " a été enregistrée avec succès."
+                'message' => "La feuille d'appel du réfectoire pour le " . \Illuminate\Support\Carbon::parse($date)->format('d/m/Y') . " a été enregistrée et verrouillée avec succès."
             ], 200);
 
         } catch (\Exception $e) {
@@ -884,6 +1109,92 @@ class CanteenController extends Controller
     }
 
 
+
+    /**
+     * Historique de tous les appels du réfectoire déjà enregistrés et
+     * verrouillés — qui a validé, quand, et le décompte du jour.
+     * URL : GET /api/canteen-attendances/history
+     */
+    public function canteenAttendanceHistory()
+    {
+        try {
+            $sheets = CanteenAttendanceSheet::with('submitter')
+                ->orderBy('attendance_date', 'desc')
+                ->get();
+
+            $formatted = $sheets->map(function ($sheet) {
+                $presentCount = CanteenAttendance::where('attendance_date', $sheet->attendance_date->format('Y-m-d'))
+                    ->where('present', 1)
+                    ->count();
+                $totalCount = CanteenAttendance::where('attendance_date', $sheet->attendance_date->format('Y-m-d'))
+                    ->count();
+
+                return [
+                    'id'              => $sheet->id,
+                    'attendance_date' => $sheet->attendance_date->format('Y-m-d'),
+                    'submitted_by'    => $sheet->submitter->name ?? 'Système',
+                    'submitted_at'    => $sheet->submitted_at->format('Y-m-d H:i'),
+                    'present_count'   => $presentCount,
+                    'total_count'     => $totalCount,
+                ];
+            });
+
+            return response()->json($formatted, 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors du chargement de l’historique des appels.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Génère le PDF imprimable de la feuille d'appel d'un jour déjà
+     * verrouillé — inclut qui a validé et à quelle heure.
+     * URL : GET /api/canteen-attendances/{date}/pdf
+     */
+    public function canteenAttendanceSheetPdf(string $date)
+    {
+        try {
+            $sheet = CanteenAttendanceSheet::with('submitter')
+                ->where('attendance_date', $date)
+                ->firstOrFail();
+
+            $attendances = CanteenAttendance::with(['subscription.student.classe', 'subscription.mealType'])
+                ->where('attendance_date', $date)
+                ->get()
+                ->sortBy(fn ($a) => $a->subscription->student->last_name ?? '')
+                ->values();
+
+            $establishment = \App\Models\Establishment::find(current_establishment_id());
+
+            $data = [
+                'sheet'         => $sheet,
+                'attendances'   => $attendances,
+                'establishment' => $establishment,
+                'date'          => $date,
+            ];
+
+            $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.canteen-attendance-sheet-pdf', $data)
+                ->setPaper('a4', 'portrait');
+
+            return $pdf->stream("appel-cantine-{$date}.pdf");
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Aucun appel verrouillé n'existe pour cette date."
+            ], 404);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors de la génération du PDF.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
 
     /**
      * Récupère le grand livre de toutes les charges et dépenses de la cantine (Mois en cours).
@@ -1154,6 +1465,7 @@ class CanteenController extends Controller
      */
     public function storeStockMovement(Request $request)
     {
+        assert_writable_year(); // ─── AJOUT : bloque en consultation d'année archivée
         // 1. Validation stricte de la structure du mouvement
         $validated = $request->validate([
             'canteen_product_id' => ['required', 'exists:canteen_products,id'],
@@ -1217,6 +1529,7 @@ class CanteenController extends Controller
      */
     public function storeProduct(Request $request)
     {
+        assert_writable_year(); // ─── AJOUT : bloque en consultation d'année archivée
         $validated = $request->validate([
             'name'            => ['required', 'string', 'max:100', 'unique:canteen_products,name'],
             'unit'            => ['required', 'string', 'max:20'], // Sac, Litre, Carton, kg, etc.
@@ -1311,6 +1624,7 @@ class CanteenController extends Controller
      */
     public function storeSupplier(Request $request)
     {
+        assert_writable_year(); // ─── AJOUT : bloque en consultation d'année archivée
         $validated = $request->validate([
             'company_name' => ['required', 'string', 'max:150'],
             'contact_name' => ['nullable', 'string', 'max:100'],
@@ -1332,6 +1646,298 @@ class CanteenController extends Controller
                 'message' => "Erreur lors de l'enregistrement du fournisseur.",
                 'debug'   => $e->getMessage()
             ], 500);
+        }
+    }
+
+    /**
+     * Historique global de tous les versements cantine (paiements et
+     * renouvellements confondus), toutes fiches confondues.
+     * URL : GET /api/canteen-payments/receipts
+     */
+    public function canteenReceiptsHistory()
+    {
+        try {
+            $payments = CanteenPayment::with(['subscription.student.classe', 'collector'])
+                ->orderBy('payment_date', 'desc')
+                ->orderBy('id', 'desc')
+                ->get();
+
+            $formatted = $payments->map(function ($p) {
+                $sub = $p->subscription;
+                $student = $sub ? $sub->student : null;
+
+                return [
+                    'id'             => $p->id,
+                    'receipt_number' => $p->receipt_number,
+                    'type'           => $p->type, // payment / renewal
+                    'amount'         => (int) $p->amount,
+                    'payment_date'   => $p->payment_date ? $p->payment_date->format('Y-m-d') : null,
+
+                    'student_name'   => $student ? ($student->last_name . ' ' . $student->first_name) : 'Élève inconnu',
+                    'matricule'      => $student ? $student->matricule : 'N/A',
+                    'class_name'     => ($student && $student->classe) ? $student->classe->name : 'N/A',
+
+                    'collector_name' => $p->collector ? $p->collector->name : 'Système',
+                ];
+            });
+
+            return response()->json($formatted, 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors du chargement de l’historique des versements.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Génère le PDF imprimable d'un reçu individuel de versement cantine.
+     * URL : GET /api/canteen-payments/{id}/receipt/pdf
+     */
+    public function canteenPaymentReceiptPdf(string $id)
+    {
+        try {
+            $payment = CanteenPayment::with(['subscription.student.classe', 'subscription.mealType', 'collector'])
+                ->findOrFail($id);
+
+            $establishment = \App\Models\Establishment::find(current_establishment_id());
+
+            $data = [
+                'payment'       => $payment,
+                'subscription'  => $payment->subscription,
+                'student'       => $payment->subscription ? $payment->subscription->student : null,
+                'establishment' => $establishment,
+                'generated_at'  => now(),
+            ];
+
+            $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.canteen-payment-receipt-pdf', $data)
+                ->setPaper('a5', 'portrait');
+
+            return $pdf->stream("recu-cantine-{$payment->receipt_number}.pdf");
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Reçu de versement introuvable.'
+            ], 404);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors de la génération du reçu PDF.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RAPPORT FINANCIER CANTINE — résumé, dépenses par catégorie,
+    // recouvrement, évolution mensuelle, impayés. Écran + PDF + Excel.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Calcule toutes les données du rapport financier cantine pour une
+     * période donnée — réutilisée par les 3 formats (JSON, PDF, Excel).
+     */
+    private function computeCanteenReportData(string $from, string $to): array
+    {
+        // A. Résumé — recettes réelles (registre CanteenPayment) vs dépenses
+        $totalReceipts = (int) CanteenPayment::whereBetween('payment_date', [$from, $to])->sum('amount');
+        $totalExpenses = (int) CanteenExpense::whereBetween('expense_date', [$from, $to])->sum('amount');
+        $netBalance = $totalReceipts - $totalExpenses;
+        $isProfit = $netBalance >= 0;
+        $coverageRate = $totalExpenses > 0 ? round(($totalReceipts / $totalExpenses) * 100) : 100;
+
+        // B. Répartition des dépenses par catégorie sur la période
+        $expensesByCategory = CanteenExpense::whereBetween('expense_date', [$from, $to])
+            ->select('category', DB::raw('SUM(amount) as total'))
+            ->groupBy('category')
+            ->orderByDesc('total')
+            ->get()
+            ->map(fn ($row) => ['category' => $row->category, 'total' => (int) $row->total])
+            ->values();
+
+        // C. Snapshot recouvrement — sur les abonnements actifs à ce jour
+        // (indépendant de la période choisie, c'est un état présent)
+        $subscriptions = CanteenSubscription::all();
+        $paidCount = $subscriptions->where('payment_status', 'paid')->count();
+        $partialCount = $subscriptions->where('payment_status', 'partial')->count();
+        $unpaidCount = $subscriptions->where('payment_status', 'unpaid')->count();
+        $paidTotal = (int) $subscriptions->where('payment_status', 'paid')->sum('amount_paid');
+        $partialTotal = (int) $subscriptions->where('payment_status', 'partial')->sum('amount_paid');
+        $unpaidTotal = (int) $subscriptions->where('payment_status', 'unpaid')->sum('amount_paid');
+
+        // D. Évolution mensuelle — 6 derniers mois glissants
+        $monthlyTrend = [];
+        for ($i = 5; $i >= 0; $i--) {
+            $monthStart = Carbon::now()->subMonths($i)->startOfMonth();
+            $monthEnd = Carbon::now()->subMonths($i)->endOfMonth();
+
+            $monthlyTrend[] = [
+                'label'    => $monthStart->translatedFormat('M Y'),
+                'receipts' => (int) CanteenPayment::whereBetween('payment_date', [$monthStart->format('Y-m-d'), $monthEnd->format('Y-m-d')])->sum('amount'),
+                'expenses' => (int) CanteenExpense::whereBetween('expense_date', [$monthStart->format('Y-m-d'), $monthEnd->format('Y-m-d')])->sum('amount'),
+            ];
+        }
+
+        // E. Liste des impayés/avances, triée par reste dû décroissant
+        $unpaidList = CanteenSubscription::with(['student.classe', 'mealType'])
+            ->whereIn('payment_status', ['unpaid', 'partial'])
+            ->get()
+            ->map(function ($sub) {
+                $student = $sub->student;
+                return [
+                    'student_name' => $student ? ($student->last_name . ' ' . $student->first_name) : 'Élève inconnu',
+                    'matricule'    => $student ? $student->matricule : 'N/A',
+                    'class_name'   => ($student && $student->classe) ? $student->classe->name : 'N/A',
+                    'meal_type'    => $sub->mealType ? $sub->mealType->name : 'N/A',
+                    'total_amount' => (int) $sub->total_amount,
+                    'amount_paid'  => (int) $sub->amount_paid,
+                    'remaining'    => (int) max(0, $sub->total_amount - $sub->amount_paid),
+                    'payment_status' => $sub->payment_status,
+                ];
+            })
+            ->sortByDesc('remaining')
+            ->values();
+
+        return [
+            'summary' => [
+                'total_receipts' => $totalReceipts,
+                'total_expenses' => $totalExpenses,
+                'net_balance'    => $netBalance,
+                'is_profit'      => $isProfit,
+                'coverage_rate'  => $coverageRate,
+            ],
+            'expenses_by_category' => $expensesByCategory,
+            'recovery' => [
+                'paid'    => ['count' => $paidCount, 'total' => $paidTotal],
+                'partial' => ['count' => $partialCount, 'total' => $partialTotal],
+                'unpaid'  => ['count' => $unpaidCount, 'total' => $unpaidTotal],
+            ],
+            'monthly_trend' => $monthlyTrend,
+            'unpaid_list'   => $unpaidList,
+        ];
+    }
+
+    /**
+     * URL : GET /api/canteen/reports?from=...&to=...
+     */
+    public function financialReport(Request $request)
+    {
+        try {
+            $from = $request->query('from', Carbon::now()->startOfMonth()->format('Y-m-d'));
+            $to   = $request->query('to', Carbon::now()->endOfMonth()->format('Y-m-d'));
+
+            $data = $this->computeCanteenReportData($from, $to);
+
+            return response()->json($data, 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors du calcul du rapport financier.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * URL : GET /api/canteen/reports/pdf
+     */
+    public function financialReportPdf(Request $request)
+    {
+        try {
+            $from = $request->query('from', Carbon::now()->startOfMonth()->format('Y-m-d'));
+            $to   = $request->query('to', Carbon::now()->endOfMonth()->format('Y-m-d'));
+
+            $data = $this->computeCanteenReportData($from, $to);
+            $data['from'] = $from;
+            $data['to'] = $to;
+            $data['establishment'] = \App\Models\Establishment::find(current_establishment_id());
+            $data['generated_at'] = now();
+
+            $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.canteen-report-pdf', $data)
+                ->setPaper('a4', 'portrait');
+
+            return $pdf->stream("rapport-financier-cantine-{$from}-au-{$to}.pdf");
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors de la génération du rapport PDF.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * URL : GET /api/canteen/reports/excel
+     */
+    public function financialReportExcel(Request $request)
+    {
+        try {
+            $from = $request->query('from', Carbon::now()->startOfMonth()->format('Y-m-d'));
+            $to   = $request->query('to', Carbon::now()->endOfMonth()->format('Y-m-d'));
+
+            $data = $this->computeCanteenReportData($from, $to);
+
+            return Excel::download(new CanteenReportExport($data, $from, $to), "rapport-financier-cantine-{$from}-au-{$to}.xlsx");
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Une erreur est survenue lors de la génération du fichier Excel.',
+                'debug'   => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // CARTE CANTINE + QR CODE — routes PUBLIQUES (hors auth:sanctum),
+    // consultées en scannant le QR imprimé sur la carte physique de
+    // l'élève. Aucune donnée sensible (pas de compte, pas de mot de
+    // passe) — uniquement l'état de l'abonnement cantine.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Génère la carte cantine imprimable au format PDF.
+     * ─── SIMPLIFIÉ : le QR code n'est plus généré ici — il est produit
+     * côté React (comme pour Transport), via un service externe léger,
+     * et pointe simplement vers CETTE route. Aucune dépendance PHP au QR,
+     * aucune page de vérification séparée à maintenir : scanner le QR
+     * régénère cette même carte à jour.
+     * URL PUBLIQUE : GET /api/public/canteen-card/{id}/pdf
+     */
+    public function canteenCardPdf(string $id)
+    {
+        try {
+            $subscription = CanteenSubscription::with(['student.classe', 'mealType'])->findOrFail($id);
+
+            // ─── Établissement dérivé directement de la colonne de
+            // l'abonnement, PAS des helpers current_establishment_*()
+            // (qui dépendent d'une session authentifiée — inexistante
+            // ici puisque cette route est publique, sans connexion).
+            $establishment = \App\Models\Establishment::find($subscription->establishment_id);
+
+            $remaining = max(0, (int) $subscription->total_amount - (int) $subscription->amount_paid);
+
+            $data = [
+                'subscription'      => $subscription,
+                'student'           => $subscription->student,
+                'establishmentName' => $establishment->name ?? 'Établissement scolaire',
+                'remaining'         => $remaining,
+            ];
+
+            $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.canteen-card-pdf', $data);
+
+            $matricule = $subscription->student->matricule ?? $subscription->id;
+            return $pdf->stream("carte-cantine-{$matricule}.pdf");
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            abort(404, 'Carte de cantine introuvable.');
+        } catch (\Exception $e) {
+            abort(500, 'Erreur lors de la génération du document.');
         }
     }
 

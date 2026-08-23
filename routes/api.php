@@ -57,7 +57,15 @@ use Illuminate\Support\Facades\Route;
     //       CONNeXION STANDARD UTILISATEURS MULTI-TENANTS 
     // __________________________________________________________________
     Route::post('/auth/login-user', [AdminApiController::class, 'loginUser']);
-     Route::get('/public/transport-card/{id}/pdf', [TransportController::class, 'downloadCardPdf']);
+    Route::get('/public/transport-card/{id}/pdf', [TransportController::class, 'downloadCardPdf']);
+    Route::get('/public/canteen-card/{id}/pdf', [CanteenController::class, 'canteenCardPdf']);
+
+    // Route::get('/public/canteen-card/{id}/pdf', [CanteenController::class, 'canteenCardPdf'])
+    //     ->name('canteen.card.pdf');
+    // Route::get('/public/canteen-card/{id}/verify', [CanteenController::class, 'canteenCardVerify'])
+    //     ->name('canteen.card.verify');
+    // Route::get('/public/canteen-card/{id}/qr-image', [CanteenController::class, 'canteenCardQrImage'])
+    //     ->name('canteen.card.qr');
 
     // ─── Réinitialisation de mot de passe par OTP ───
     // Publiques (pas de connexion requise) mais protégées par throttle :
@@ -71,6 +79,7 @@ use Illuminate\Support\Facades\Route;
     // ─── NOUVELLES ROUTES : Login multi-tenant (établissement + année) ───────
     // Étape 1 : Connexion avec code + login + mot de passe
     Route::post('/auth/login-establishment', [AdminApiController::class, 'loginWithEstablishment']);
+    Route::post('/auth/verify-login-otp', [AdminApiController::class, 'verifyLoginOtp']);
 
     // Étape 2 : Sélection de l'année (nécessite le temp_token de l'étape 1)
     Route::post('/auth/select-year', [AdminApiController::class, 'selectYear'])
@@ -394,6 +403,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/canteen/dashboard', [CanteenController::class, 'dashboardMetrics'])
         ->middleware('permission:canteen.view');
 
+        // ─── AJOUT : historique global de tous les versements cantine ───
+    Route::get('/canteen-payments/receipts', [CanteenController::class, 'canteenReceiptsHistory'])
+        ->middleware('permission:canteen_subscriptions.view');
+
+    // ─── AJOUT : reçu PDF individuel d'un versement cantine ───
+    Route::get('/canteen-payments/{id}/receipt/pdf', [CanteenController::class, 'canteenPaymentReceiptPdf'])
+        ->middleware('permission:canteen_subscriptions.view');
+
     // 2. Configuration & Gestion des Forfaits / Tarifs repas — rattaché à
     // canteen_stock.manage faute de permission dédiée "meal_types" dans le
     // catalogue (à créer plus tard si besoin de plus de granularité).
@@ -432,6 +449,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/canteen-attendances', [CanteenController::class, 'storeAttendance'])
         ->middleware('permission:canteen_subscriptions.edit');
 
+    // ─── AJOUT : historique des appels verrouillés + PDF individuel ───
+    Route::get('/canteen-attendances/history', [CanteenController::class, 'canteenAttendanceHistory'])
+        ->middleware('permission:canteen.view');
+    Route::get('/canteen-attendances/{date}/pdf', [CanteenController::class, 'canteenAttendanceSheetPdf'])
+        ->middleware('permission:canteen.view');
+
     // 6. Gestion du livre des Dépenses de la Cuisine (Marché hebdomadaire)
     Route::get('/canteen-expenses', [CanteenController::class, 'indexExpenses'])
         ->middleware('permission:canteen_expenses.view');
@@ -455,6 +478,16 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:canteen_stock.view');
     Route::post('/canteen/suppliers', [CanteenController::class, 'storeSupplier'])
         ->middleware('permission:canteen_stock.manage');
+
+
+    // ─── AJOUT : rapport financier Cantine (résumé, dépenses par
+    // catégorie, recouvrement, évolution, impayés) — écran + PDF + Excel.
+    Route::get('/canteen/reports', [CanteenController::class, 'financialReport'])
+        ->middleware('permission:financial_reports.view');
+    Route::get('/canteen/reports/pdf', [CanteenController::class, 'financialReportPdf'])
+        ->middleware('permission:financial_reports.view');
+    Route::get('/canteen/reports/excel', [CanteenController::class, 'financialReportExcel'])
+        ->middleware('permission:financial_reports.view');
 
     // ─────────────────────────────────────────────────────────────────────────────
     // MODULE TRANSPORT SCOLAIRE & PARC AUTOMOBILE
