@@ -6,6 +6,8 @@ use App\Models\Academic\AcademicYears;
 use App\Mail\EstablishmentWelcomeMail;
 use App\Models\ActivityLog;
 use App\Models\Establishment;
+use App\Models\EstablishmentModuleAccess;
+use App\Models\Module;
 use App\Models\SuperAdmin;
 use App\Models\User;
 use Illuminate\Support\Facades\Mail;
@@ -442,6 +444,172 @@ class SuperAdminApiController extends Controller
         return response()->json([
             'status'  => 'success',
             'message' => "L'établissement \"{$name}\" et toutes ses données ont été supprimés.",
+        ]);
+    }
+
+    /**
+     * ─── AJOUT : NIVEAU GLOBAL — liste tous les modules du catalogue avec
+     * leur réglage par défaut, et le nombre d'établissements ayant une
+     * exception explicite dessus (utile pour prévenir avant de changer un
+     * défaut qui aurait beaucoup d'exceptions dessus).
+     * GET /superadmin/modules
+     */
+    public function listModules()
+    {
+        $modules = Module::withCount('establishmentOverrides')->orderBy('label')->get();
+
+        $formatted = $modules->map(function ($module) {
+            return [
+                'id'                   => $module->id,
+                'key'                  => $module->key,
+                'label'                => $module->label,
+                'description'          => $module->description,
+                'is_active_by_default' => (bool) $module->is_active_by_default,
+                'overrides_count'      => $module->establishment_overrides_count,
+            ];
+        });
+
+        return response()->json([
+            'status'  => 'success',
+            'modules' => $formatted,
+        ]);
+    }
+
+    /**
+     * ─── AJOUT : NIVEAU GLOBAL — bascule le défaut du catalogue pour un
+     * module. Affecte tous les établissements qui n'ont PAS d'exception
+     * explicite dessus (établissements avec exception → inchangés, elle
+     * prime toujours sur le défaut).
+     * PUT /superadmin/modules/{key}
+     */
+    public function toggleGlobalModule(Request $request, string $key)
+    {
+        $module = Module::where('key', $key)->firstOrFail();
+
+        $validated = $request->validate([
+            'is_active_by_default' => 'required|boolean',
+        ]);
+
+        $module->update(['is_active_by_default' => $validated['is_active_by_default']]);
+
+        $overridesCount = EstablishmentModuleAccess::where('module_id', $module->id)->count();
+
+        ActivityLog::record(
+            $request->user(),
+            'module.global_toggled',
+            ($validated['is_active_by_default'] ? "A activé" : "A désactivé") . " globalement le module \"{$module->label}\" (défaut du catalogue)."
+                . ($overridesCount > 0 ? " {$overridesCount} établissement(s) ont une exception explicite et ne sont pas affectés." : ""),
+            'Module',
+            $module->id
+        );
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => "Module \"{$module->label}\" " . ($validated['is_active_by_default'] ? 'activé' : 'désactivé') . " globalement."
+                . ($overridesCount > 0 ? " ({$overridesCount} établissement(s) avec une exception restent inchangés.)" : ""),
+            'module'  => $module,
+        ]);
+    }
+
+    /**
+     * Liste tous les modules du catalogue avec leur état résolu (actif ou
+     * non) pour cet établissement précis, en précisant si c'est le défaut
+     * du catalogue ou une exception explicite posée pour cet établissement.
+     * GET /superadmin/establishments/{id}/modules
+     */
+    public function listEstablishmentModules(string $id)
+    {
+        $establishment = Establishment::findOrFail($id);
+
+        $modules = Module::orderBy('label')->get();
+        $overrides = EstablishmentModuleAccess::with('updater')
+            ->where('establishment_id', $establishment->id)
+            ->get()
+            ->keyBy('module_id');
+
+        $formatted = $modules->map(function ($module) use ($overrides) {
+            $override = $overrides->get($module->id);
+
+            return [
+                'id'                 => $module->id,
+                'key'                => $module->key,
+                'label'              => $module->label,
+                'description'        => $module->description,
+                'default_enabled'    => (bool) $module->is_active_by_default,
+                'effective_enabled'  => $override ? (bool) $override->is_enabled : (bool) $module->is_active_by_default,
+                'has_override'       => (bool) $override,
+                'overridden_by'      => $override?->updater?->name,
+                'overridden_at'      => $override?->updated_at?->format('d/m/Y H:i'),
+            ];
+        });
+
+        return response()->json([
+            'status'        => 'success',
+            'establishment' => $establishment->only(['id', 'name', 'code']),
+            'modules'       => $formatted,
+        ]);
+    }
+
+    /**
+     * Force l'état d'un module pour UN établissement précis (crée ou met
+     * à jour l'exception). Le reste des établissements n'est jamais
+     * affecté par cet appel — c'est tout l'intérêt du modèle en exceptions.
+     * PUT /superadmin/establishments/{id}/modules/{moduleKey}
+     */
+    public function toggleEstablishmentModule(Request $request, string $id, string $moduleKey)
+    {
+        $establishment = Establishment::findOrFail($id);
+        $module = Module::where('key', $moduleKey)->firstOrFail();
+
+        $validated = $request->validate([
+            'is_enabled' => 'required|boolean',
+        ]);
+
+        $access = EstablishmentModuleAccess::updateOrCreate(
+            ['establishment_id' => $establishment->id, 'module_id' => $module->id],
+            ['is_enabled' => $validated['is_enabled'], 'updated_by' => $request->user()->id]
+        );
+
+        ActivityLog::record(
+            $request->user(),
+            'establishment.module_toggled',
+            ($validated['is_enabled'] ? "A activé" : "A désactivé") . " le module \"{$module->label}\" pour l'établissement \"{$establishment->name}\".",
+            'Establishment',
+            $establishment->id
+        );
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => "Module \"{$module->label}\" " . ($validated['is_enabled'] ? 'activé' : 'désactivé') . " pour {$establishment->name}.",
+            'access'  => $access,
+        ]);
+    }
+
+    /**
+     * Retire l'exception pour ce module sur cet établissement — il
+     * retombe alors sur le comportement par défaut du catalogue.
+     * DELETE /superadmin/establishments/{id}/modules/{moduleKey}
+     */
+    public function resetEstablishmentModule(Request $request, string $id, string $moduleKey)
+    {
+        $establishment = Establishment::findOrFail($id);
+        $module = Module::where('key', $moduleKey)->firstOrFail();
+
+        EstablishmentModuleAccess::where('establishment_id', $establishment->id)
+            ->where('module_id', $module->id)
+            ->delete();
+
+        ActivityLog::record(
+            $request->user(),
+            'establishment.module_reset',
+            "A réinitialisé le module \"{$module->label}\" au comportement par défaut pour l'établissement \"{$establishment->name}\".",
+            'Establishment',
+            $establishment->id
+        );
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => "Module \"{$module->label}\" réinitialisé au comportement par défaut pour {$establishment->name}.",
         ]);
     }
 

@@ -542,6 +542,31 @@ class AdminApiController extends Controller
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // AJOUT : carte des modules activés pour l'établissement de l'utilisateur
+    // connecté — utilisée par le frontend pour construire dynamiquement la
+    // sidebar (n'affiche que les modules réellement accessibles).
+    // GET /api/me/enabled-modules
+    // ─────────────────────────────────────────────────────────────────────────
+    public function enabledModules(Request $request)
+    {
+        try {
+            $establishmentId = $request->user()->establishment_id;
+            $map = get_enabled_modules_map($establishmentId);
+
+            return response()->json([
+                'status'  => 'success',
+                'modules' => $map,
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('Erreur enabledModules : ' . $e->getMessage());
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Erreur lors du chargement des modules disponibles.',
+            ], 500);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // DÉCONNEXION (INCHANGÉ)
     // ─────────────────────────────────────────────────────────────────────────
     public function logout(Request $request)

@@ -25,20 +25,30 @@ class EmployeeController extends Controller
  * Liste globale de tous les employés avec poste et contrat actif.
  * URL : GET /api/employees
  */
-    public function index()
+    public function index(Request $request)
     {
         try {
-            // Chargement optimisé avec les relations indispensables
-            $employees = Employee::with([
+            // ─── CORRECTIF : le frontend (GeneratePayrollPage.jsx) appelle
+            // /employees?status=active en pensant filtrer les employés
+            // suspendus de la liste — mais ce paramètre était totalement
+            // ignoré ici, qui excluait uniquement 'left', laissant les
+            // employés 'suspended' apparaître dans le sélecteur de
+            // génération de bulletin (risque de payer un agent suspendu).
+            $query = Employee::with([
                 'position', 
                 'contracts' => function ($query) {
                     // On cible uniquement le contrat actuellement actif
                     $query->where('status', 'active');
                 }
-            ])
-            ->where('status', '!=', 'left') // Optionnel : masque d'office ceux qui ont quitté l'établissement
-            ->latest('hire_date')
-            ->get();
+            ]);
+
+            if ($request->filled('status')) {
+                $query->where('status', $request->query('status'));
+            } else {
+                $query->where('status', '!=', 'left'); // Comportement par défaut inchangé
+            }
+
+            $employees = $query->latest('hire_date')->get();
 
             // Reformatage propre des données pour simplifier la lecture côté React
             $formattedEmployees = $employees->map(function ($emp) {
@@ -336,6 +346,17 @@ class EmployeeController extends Controller
 
         // 3. Mise à jour en base de données
         $employee->update($validated);
+
+        // ─── AJOUT : cohérence avec destroy()/"Archiver l'agent" — sans
+        // ça, un employé passé à "left" via CE formulaire gardait son
+        // contrat marqué "actif" pour toujours (seul le bouton Archiver
+        // faisait cette clôture), menant à des données RH incohérentes
+        // selon le chemin utilisé pour marquer un départ.
+        if ($validated['status'] === 'left') {
+            EmployeeContrat::where('employee_id', $employee->id)
+                ->where('status', 'active')
+                ->update(['status' => 'expired']);
+        }
 
         return response()->json([
             'status'  => 'success',

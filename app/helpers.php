@@ -117,3 +117,56 @@ if (!function_exists('assert_writable_year')) {
         }
     }
 }
+
+// ─── AJOUT : résolution de l'état d'un module pour un établissement ───
+// Vérifie d'abord s'il existe une EXCEPTION explicite pour cet
+// établissement (table establishment_module_access) — si oui, elle
+// prime toujours. Sinon, retombe sur le défaut du catalogue (table
+// modules). Si le module n'existe même pas dans le catalogue, on
+// considère par sécurité qu'il est actif (évite de bloquer un module
+// historique qu'on aurait oublié d'ajouter au catalogue par erreur).
+if (!function_exists('module_enabled')) {
+    function module_enabled(string $moduleKey, ?int $establishmentId = null): bool
+    {
+        $establishmentId = $establishmentId ?? current_establishment_id();
+
+        $module = \App\Models\Module::where('key', $moduleKey)->first();
+
+        if (!$module) {
+            return true;
+        }
+
+        $override = \App\Models\EstablishmentModuleAccess::where('establishment_id', $establishmentId)
+            ->where('module_id', $module->id)
+            ->first();
+
+        if ($override) {
+            return (bool) $override->is_enabled;
+        }
+
+        return (bool) $module->is_active_by_default;
+    }
+}
+
+// ─── AJOUT : renvoie la carte complète {clé_module: bool} pour un
+// établissement — utilisé par l'endpoint /me/enabled-modules pour
+// construire dynamiquement la sidebar côté frontend.
+if (!function_exists('get_enabled_modules_map')) {
+    function get_enabled_modules_map(?int $establishmentId = null): array
+    {
+        $establishmentId = $establishmentId ?? current_establishment_id();
+
+        $modules = \App\Models\Module::all();
+        $overrides = \App\Models\EstablishmentModuleAccess::where('establishment_id', $establishmentId)
+            ->pluck('is_enabled', 'module_id');
+
+        $map = [];
+        foreach ($modules as $module) {
+            $map[$module->key] = $overrides->has($module->id)
+                ? (bool) $overrides->get($module->id)
+                : (bool) $module->is_active_by_default;
+        }
+
+        return $map;
+    }
+}
