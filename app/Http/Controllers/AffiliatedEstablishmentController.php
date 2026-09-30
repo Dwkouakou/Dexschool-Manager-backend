@@ -422,10 +422,17 @@ class AffiliatedEstablishmentController extends Controller
                 continue;
             }
 
+            // ─── CORRECTIF : on exclut les inscriptions/réinscriptions
+            // annulées (status = 'cancelled') de ce bilan financier du
+            // groupe, comme déjà fait dans PaymentController::getScolariteMetrics().
+            // Sans ce filtre, le montant d'une inscription annulée restait
+            // compté dans le total dû/encaissé/effectifs de l'établissement
+            // concerné et donc dans le grand total du groupe.
             $financialsQuery = fn() => EnrollmentFinancial::withoutGlobalScopes()
                 ->whereHas('enrollment', function ($q) use ($activeYear, $est) {
                     $q->withoutGlobalScopes()
                       ->where('academic_year_id', $activeYear->id)
+                      ->where('status', '!=', 'cancelled')
                       ->whereHas('student', fn($s) => $s->withoutGlobalScopes()->where('establishment_id', $est->id));
                 });
 
