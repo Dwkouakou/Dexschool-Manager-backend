@@ -572,18 +572,37 @@ class StudentController extends Controller
             }
 
             if (!empty($request->tutor_name)) {
-                \App\Models\Academic\StudentParent::updateOrCreate(
-                    [
-                        'student_id' => $student->id,
-                        'type'       => 'guardian',
-                    ],
-                    [
+                // ─── Le formulaire édite le parent CONTACT PRINCIPAL (père, mère
+                // ou tuteur), identifié par tutor_id — plus seulement le "guardian".
+                // On met à jour CE parent précis, sans écraser son prénom ni
+                // son type, et sans toucher aux autres champs (email, adresse...).
+                $tutorId = $request->input('tutor_id');
+                $existingParent = $tutorId
+                    ? \App\Models\Academic\StudentParent::where('student_id', $student->id)->find($tutorId)
+                    : null;
+
+                if ($existingParent) {
+                    $existingParent->update([
+                        'last_name'  => $request->tutor_name,
+                        'first_name' => $request->input('tutor_first_name', $existingParent->first_name) ?? '',
+                        'phone'      => $request->tutor_phone ?: $existingParent->phone,
+                        'profession' => $request->filled('tutor_profession') ? $request->tutor_profession : null,
+                    ]);
+                } else {
+                    // Aucun parent existant : création d'un tuteur, contact principal
+                    \App\Models\Academic\StudentParent::where('student_id', $student->id)
+                        ->update(['is_main_contact' => false]);
+
+                    \App\Models\Academic\StudentParent::create([
+                        'student_id'      => $student->id,
+                        'type'            => 'guardian',
                         'last_name'       => $request->tutor_name,
-                        'first_name'      => '',
+                        'first_name'      => $request->input('tutor_first_name', '') ?? '',
                         'phone'           => $request->tutor_phone ?: '0000000000',
+                        'profession'      => $request->filled('tutor_profession') ? $request->tutor_profession : null,
                         'is_main_contact' => true,
-                    ]
-                );
+                    ]);
+                }
             }
 
             \Illuminate\Support\Facades\DB::commit();

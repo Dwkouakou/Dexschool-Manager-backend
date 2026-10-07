@@ -329,7 +329,11 @@ Route::middleware('auth:sanctum')->group(function () {
     // partie du dossier élève, pas de permission dédiée dans le catalogue)
     Route::post('/student-parents', [StudentParentController::class, 'store'])
         ->middleware('permission:students.edit')->middleware('module:students');
-
+    Route::put('/student-parents/{id}', [StudentParentController::class, 'update'])
+      ->middleware('permission:students.edit')->middleware('module:students');
+    Route::post('/student-parents/{id}', [StudentParentController::class, 'update'])
+      ->middleware('permission:students.edit')->middleware('module:students');
+      
     //gestion des documents 
     Route::post('/students/{student_id}/documents', [StudentDocumentController::class, 'store'])
         ->middleware('permission:documents.upload')->middleware('module:students');
@@ -349,6 +353,14 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:enrollments.validate')->middleware('module:enrollments');
     Route::post('/enrollments/{id}/cancel', [EnrollmentController::class, 'cancelEnrollment'])
         ->middleware('permission:enrollments.cancel')->middleware('module:enrollments');
+    // Guichet de transfert : muter / réorienter un élève inscrit (classe seulement,
+    // aucun impact financier). Réutilise enrollments.cancel (niveau de droit sensible).
+    Route::post('/enrollments/{id}/transfer', [EnrollmentController::class, 'transfer'])
+        ->middleware('permission:enrollments.cancel')->middleware('module:enrollments');
+
+    Route::get('/enrollment-transfers', [EnrollmentController::class, 'transfersHistory'])
+        ->middleware('permission:enrollments.view')->middleware('module:enrollments');
+        
     Route::get('/enrollments/{id}', [EnrollmentController::class, 'show'])
         ->middleware('permission:enrollments.view')->middleware('module:enrollments');
     // 2. Route pour l'ensemble des classes

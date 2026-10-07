@@ -214,6 +214,7 @@ class EnrollmentController extends Controller
                 'status'            => $enr->status,
                 'enrollment_date'   => $enr->enrollment_date ? $enr->enrollment_date->format('Y-m-d') : null,
                 'notes'             => $enr->notes,
+                'class_id'          => $enr->class_id,
                 'class'             => $enr->classe ? $enr->classe->name : 'N/A',
                 'cycle'             => ($enr->classe && $enr->classe->level) ? $enr->classe->level->name : 'N/A',
                 'academic_year'     => $enr->academicYear ? $enr->academicYear->name : 'N/A',
@@ -300,6 +301,157 @@ class EnrollmentController extends Controller
 
             return response()->json(['status' => 'success', 'message' => 'Inscription annulée. La place a été libérée dans la classe.']);
         });
+    }
+
+    /**
+     * GUICHET DE TRANSFERT — muter / réorienter un élève inscrit vers une
+     * autre classe de la MÊME année. Transfert purement administratif : les
+     * montants (total_due, acompte, paiements) ne sont jamais modifiés.
+     *
+     * Répercute le changement sur les TROIS endroits qui portent la classe :
+     *   1. enrollments.class_id
+     *   2. students.class_id (+ academic_year_id)
+     *   3. la fiche StudentAcademicRecord de l'année de l'inscription
+     * et écrit une ligne d'historique (enrollment_transfers).
+     *
+     * POST /enrollments/{id}/transfer   { to_class_id, reason }
+     */
+    public function transfer(Request $request, string $id)
+    {
+        assert_writable_year();
+
+        $validated = $request->validate([
+            'to_class_id' => ['required', 'exists:classes,id'],
+            'reason'      => ['required', 'string', 'min:3', 'max:500'],
+        ], [
+            'to_class_id.required' => 'Veuillez choisir la classe de destination.',
+            'reason.required'      => 'Le motif du transfert est obligatoire.',
+        ]);
+
+        $enrollment = Enrollment::findOrFail($id);
+
+        if ($enrollment->status === 'cancelled') {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Une inscription annulée ne peut pas être transférée.",
+            ], 422);
+        }
+
+        $target = Classe::findOrFail($validated['to_class_id']);
+
+        if ((int) $target->academic_year_id !== (int) $enrollment->academic_year_id) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "La classe de destination n'appartient pas à l'année scolaire de cette inscription.",
+            ], 422);
+        }
+
+        if ((int) $target->id === (int) $enrollment->class_id) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "L'élève est déjà dans cette classe.",
+            ], 422);
+        }
+
+        $maxCapacity = (int) $target->capacity;
+        $currentCount = Student::where('class_id', $target->id)
+            ->where('academic_year_id', $enrollment->academic_year_id)
+            ->where('id', '!=', $enrollment->student_id)
+            ->count();
+
+        if ($maxCapacity > 0 && $currentCount >= $maxCapacity) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Transfert refusé : la classe '{$target->name}' a atteint sa capacité limite de {$maxCapacity} places.",
+            ], 422);
+        }
+
+        return DB::transaction(function () use ($enrollment, $target, $validated) {
+            $fromClassId = $enrollment->class_id;
+
+            // 1. Inscription
+            $enrollment->update(['class_id' => $target->id]);
+
+            // 2. Dossier élève
+            $student = Student::findOrFail($enrollment->student_id);
+            $student->update([
+                'class_id'         => $target->id,
+                'academic_year_id' => $enrollment->academic_year_id,
+            ]);
+
+            // 3. Fiche académique de l'année de l'inscription
+            $record = \App\Models\Academic\StudentAcademicRecord::withoutGlobalScope('viewingYear')
+                ->where('student_id', $student->id)
+                ->where('academic_year_id', $enrollment->academic_year_id)
+                ->first();
+
+            if ($record) {
+                $record->update(['class_id' => $target->id]);
+            } else {
+                \App\Models\Academic\StudentAcademicRecord::create([
+                    'student_id'       => $student->id,
+                    'academic_year_id' => $enrollment->academic_year_id,
+                    'class_id'         => $target->id,
+                ]);
+            }
+
+            // Historique
+            \App\Models\officeAdministration\EnrollmentTransfer::create([
+                'enrollment_id'    => $enrollment->id,
+                'student_id'       => $student->id,
+                'academic_year_id' => $enrollment->academic_year_id,
+                'from_class_id'    => $fromClassId,
+                'to_class_id'      => $target->id,
+                'reason'           => $validated['reason'],
+                'transferred_by'   => Auth::id(),
+                'transferred_at'   => now(),
+            ]);
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => "Élève transféré vers la classe {$target->name}.",
+            ]);
+        });
+    }
+
+    /**
+     * Historique des transferts. ?enrollment_id=X pour une inscription précise,
+     * sinon tous les transferts de l'année consultée.
+     * GET /enrollments-transfers
+     */
+    public function transfersHistory(Request $request)
+    {
+        $query = \App\Models\officeAdministration\EnrollmentTransfer::with([
+                'student', 'fromClass', 'toClass', 'author', 'enrollment',
+            ])
+            ->orderByDesc('transferred_at')
+            ->orderByDesc('id');
+
+        if ($request->filled('enrollment_id')) {
+            $query->where('enrollment_id', $request->enrollment_id);
+        } else {
+            $query->where('academic_year_id', current_viewing_year_id());
+        }
+
+        $rows = $query->limit(500)->get()->map(function ($t) {
+            return [
+                'id'                => $t->id,
+                'transferred_at'    => $t->transferred_at ? $t->transferred_at->toISOString() : null,
+                'reason'            => $t->reason,
+                'from_class'        => $t->fromClass?->name ?? '—',
+                'to_class'          => $t->toClass?->name ?? '—',
+                'author'            => $t->author?->name ?? '—',
+                'enrollment_number' => $t->enrollment?->enrollment_number,
+                'student'           => [
+                    'id'         => $t->student?->id,
+                    'first_name' => $t->student?->first_name ?? '',
+                    'last_name'  => $t->student?->last_name ?? '',
+                    'matricule'  => $t->student?->matricule ?? '',
+                ],
+            ];
+        });
+
+        return response()->json($rows, 200);
     }
 
     public function show(string $id)
