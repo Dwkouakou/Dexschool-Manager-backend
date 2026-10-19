@@ -280,6 +280,13 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:students.view')->middleware('module:students');
     Route::get('/students/search', [StudentController::class, 'search'])
         ->middleware('permission:students.view')->middleware('module:students');
+    // Anti-doublons (déclarées AVANT /students/{id})
+    Route::get('/students/check-duplicate', [StudentController::class, 'checkDuplicate'])
+        ->middleware('permission:students.create')->middleware('module:students');
+    Route::get('/students/duplicates', [StudentController::class, 'duplicates'])
+        ->middleware('permission:students.delete')->middleware('module:students');
+    Route::post('/students/duplicates/resolve', [StudentController::class, 'resolveDuplicate'])
+        ->middleware('permission:students.delete')->middleware('module:students');
     Route::patch('/students/{id}/toggle-status', [StudentController::class, 'toggleStatus'])
         ->middleware('permission:students.edit')->middleware('module:students');
     Route::get('/students/trashed', [StudentController::class, 'trashed'])
@@ -357,10 +364,8 @@ Route::middleware('auth:sanctum')->group(function () {
     // aucun impact financier). Réutilise enrollments.cancel (niveau de droit sensible).
     Route::post('/enrollments/{id}/transfer', [EnrollmentController::class, 'transfer'])
         ->middleware('permission:enrollments.cancel')->middleware('module:enrollments');
-
     Route::get('/enrollment-transfers', [EnrollmentController::class, 'transfersHistory'])
         ->middleware('permission:enrollments.view')->middleware('module:enrollments');
-        
     Route::get('/enrollments/{id}', [EnrollmentController::class, 'show'])
         ->middleware('permission:enrollments.view')->middleware('module:enrollments');
     // 2. Route pour l'ensemble des classes

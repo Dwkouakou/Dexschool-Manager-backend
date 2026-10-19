@@ -32,7 +32,7 @@ class StudentParentController extends Controller
 
     // Sécurité multi-tenant : l'élève doit appartenir à l'établissement courant
     // (Student a le trait → find() ne renvoie que les élèves de cet établissement)
-    $student = \App\Models\Academic\Student::find($validated['student_id']);
+    $student = \App\Models\Academic\Student::find($validated['student_id']);  
     if (!$student) {
         return response()->json([
             'status'  => 'error',

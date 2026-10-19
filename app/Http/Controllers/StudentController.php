@@ -155,6 +155,21 @@ class StudentController extends Controller
     {
         assert_writable_year();
 
+        // ─── ANTI-DOUBLON : un élève déjà enregistré (même matricule national, ou
+        // même nom + même date de naissance) ne peut pas être recréé, même dans
+        // une autre classe. On renvoie l'endroit où il existe déjà. ───
+        $found = $this->findSimilarStudents($request->only(
+            'last_name', 'first_name', 'birth_date', 'national_matricule'
+        ));
+        if ($found['exact']->isNotEmpty()) {
+            return response()->json([
+                'status'     => 'error',
+                'code'       => 'duplicate_student',
+                'message'    => $this->duplicateMessage($found['exact']->first()),
+                'duplicates' => $found['exact']->map(fn ($d) => $this->duplicateCard($d))->values(),
+            ], 422);
+        }
+
         if ($request->filled('class_id')) {
             $classId = $request->class_id;
             $academicYearId = $request->academic_year_id ?? current_active_year_id();
@@ -514,6 +529,32 @@ class StudentController extends Controller
     {
         assert_writable_year();
 
+        // Contrôle anti-doublon seulement si l'IDENTITÉ change (nom, naissance, matricule),
+        // pour ne pas bloquer la correction d'une fiche déjà en doublon.
+        $current = Student::find($id);
+        if ($current) {
+            $newBirth = $request->filled('birth_date') ? substr((string) $request->birth_date, 0, 10) : null;
+            $oldBirth = $current->birth_date ? $current->birth_date->format('Y-m-d') : null;
+            $identityChanged =
+                $this->nameKey($request->last_name, $request->first_name) !== $this->nameKey($current->last_name, $current->first_name)
+                || $newBirth !== $oldBirth
+                || $this->normMatricule($request->national_matricule) !== $this->normMatricule($current->national_matricule);
+
+            if ($identityChanged) {
+                $found = $this->findSimilarStudents($request->only(
+                    'last_name', 'first_name', 'birth_date', 'national_matricule'
+                ), (int) $id);
+                if ($found['exact']->isNotEmpty()) {
+                    return response()->json([
+                        'status'     => 'error',
+                        'code'       => 'duplicate_student',
+                        'message'    => $this->duplicateMessage($found['exact']->first()),
+                        'duplicates' => $found['exact']->map(fn ($d) => $this->duplicateCard($d))->values(),
+                    ], 422);
+                }
+            }
+        }
+
         \Illuminate\Support\Facades\DB::beginTransaction();
 
         try {
@@ -628,6 +669,295 @@ class StudentController extends Controller
                 'debug'   => $e->getMessage()
             ], 500);
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ANTI-DOUBLONS
+    // ═════════════════════════════════════════════════════════════════════
+
+    /** Minuscules, sans accents, sans ponctuation, espaces normalisés. */
+    private function normName(?string $v): string
+    {
+        $v = mb_strtolower(trim((string) $v), 'UTF-8');
+        $v = \Illuminate\Support\Str::ascii($v);
+        $v = preg_replace('/[^a-z0-9]+/', ' ', $v);
+        return trim(preg_replace('/\s+/', ' ', $v));
+    }
+
+    /**
+     * Clé d'identité d'un nom : tokens triés, donc insensible à l'ordre
+     * (« KOUASSI Jean » = « Jean KOUASSI ») et aux accents/majuscules.
+     */
+    private function nameKey(?string $last, ?string $first): string
+    {
+        $tokens = array_filter(explode(' ', $this->normName($last) . ' ' . $this->normName($first)));
+        sort($tokens);
+        return implode(' ', $tokens);
+    }
+
+    private function normMatricule(?string $v): string
+    {
+        return strtoupper(preg_replace('/\s+/', '', (string) $v));
+    }
+
+    /**
+     * Cherche les élèves (non supprimés, de l'établissement courant) qui
+     * ressemblent à l'identité fournie.
+     *  - 'exact'    : même matricule national, OU même nom + même date de naissance
+     *  - 'probable' : même nom, date de naissance différente ou inconnue
+     * Retourne ['exact' => Collection<Student>, 'probable' => Collection<Student>]
+     */
+    private function findSimilarStudents(array $attrs, ?int $excludeId = null): array
+    {
+        $key       = $this->nameKey($attrs['last_name'] ?? '', $attrs['first_name'] ?? '');
+        $matricule = $this->normMatricule($attrs['national_matricule'] ?? '');
+        $birth     = !empty($attrs['birth_date']) ? substr((string) $attrs['birth_date'], 0, 10) : null;
+
+        $exact = collect();
+        $probable = collect();
+
+        if ($key === '' && $matricule === '') {
+            return ['exact' => $exact, 'probable' => $probable];
+        }
+
+        // Pré-filtre SQL large (même nom de famille OU même date OU même matricule),
+        // la comparaison fine (accents, ordre des mots) est faite en PHP.
+        $lastLower = mb_strtolower(trim((string) ($attrs['last_name'] ?? '')), 'UTF-8');
+
+        $candidates = Student::query()
+            ->when($excludeId, fn ($q) => $q->where('id', '!=', $excludeId))
+            ->where(function ($q) use ($lastLower, $birth, $matricule) {
+                if ($lastLower !== '') $q->orWhereRaw('LOWER(last_name) LIKE ?', ['%' . $lastLower . '%']);
+                if ($birth)            $q->orWhere('birth_date', $birth);
+                if ($matricule !== '') $q->orWhereRaw("REPLACE(UPPER(national_matricule), ' ', '') = ?", [$matricule]);
+            })
+            ->with('classe')
+            ->get();
+
+        foreach ($candidates as $c) {
+            $sameMatricule = $matricule !== '' && $this->normMatricule($c->national_matricule) === $matricule;
+            $sameName      = $key !== '' && $this->nameKey($c->last_name, $c->first_name) === $key;
+            $cBirth        = $c->birth_date ? $c->birth_date->format('Y-m-d') : null;
+            $sameBirth     = $birth && $cBirth && $birth === $cBirth;
+
+            if ($sameMatricule || ($sameName && $sameBirth)) {
+                $exact->push($c);
+            } elseif ($sameName) {
+                $probable->push($c);
+            }
+        }
+
+        return ['exact' => $exact->values(), 'probable' => $probable->values()];
+    }
+
+    /** Résumé d'un élève pour l'affichage des doublons. */
+    private function duplicateCard(Student $s): array
+    {
+        $activeEnrollments = Enrollment::withoutGlobalScope('viewingYear')
+            ->where('student_id', $s->id)
+            ->where('status', '!=', 'cancelled')
+            ->with('classe')
+            ->orderByDesc('academic_year_id')->orderByDesc('id')
+            ->get();
+
+        $lastEnr = $activeEnrollments->first();
+        $className = $s->classe?->name ?? $lastEnr?->classe?->name;
+
+        return [
+            'id'                 => $s->id,
+            'matricule'          => $s->matricule,
+            'national_matricule' => $s->national_matricule,
+            'last_name'          => $s->last_name,
+            'first_name'         => $s->first_name,
+            'gender'             => $s->gender,
+            'birth_date'         => $s->birth_date ? $s->birth_date->format('Y-m-d') : null,
+            'birth_place'        => $s->birth_place,
+            'class_name'         => $className,
+            'is_enrolled'        => (bool) $s->is_enrolled,
+            'enrollments_count'  => $activeEnrollments->count(),
+            'enrollment_number'  => $lastEnr?->enrollment_number,
+            'created_at'         => $s->created_at ? $s->created_at->toISOString() : null,
+        ];
+    }
+
+    /** Message lisible : où l'élève existe déjà. */
+    private function duplicateMessage(Student $s): string
+    {
+        $card = $this->duplicateCard($s);
+        $where = $card['class_name']
+            ? "et est déjà affecté(e) dans la classe {$card['class_name']}"
+            : "(dossier existant, sans classe pour le moment)";
+        return "Cet élève existe déjà : {$card['last_name']} {$card['first_name']} — matricule {$card['matricule']} {$where}. "
+             . "Utilisez ce dossier (inscription ou transfert) au lieu d'en créer un nouveau.";
+    }
+
+    /**
+     * Pré-contrôle appelé par le formulaire de création, avant l'enregistrement.
+     * GET /students/check-duplicate?last_name=&first_name=&birth_date=&national_matricule=
+     */
+    public function checkDuplicate(Request $request)
+    {
+        $found = $this->findSimilarStudents($request->only(
+            'last_name', 'first_name', 'birth_date', 'national_matricule'
+        ), $request->filled('exclude_id') ? (int) $request->exclude_id : null);
+
+        return response()->json([
+            'status'   => 'success',
+            'exact'    => $found['exact']->map(fn ($s) => $this->duplicateCard($s))->values(),
+            'probable' => $found['probable']->take(5)->map(fn ($s) => $this->duplicateCard($s))->values(),
+        ]);
+    }
+
+    /**
+     * Liste des groupes de doublons de l'établissement.
+     * Regroupe par matricule national OU par (identité du nom + date de naissance).
+     * GET /students/duplicates
+     */
+    public function duplicates()
+    {
+        $students = Student::with('classe')->orderBy('id')->get();
+
+        // Union-find simple : deux fiches liées par matricule OU par nom+naissance
+        // finissent dans le même groupe.
+        $parent = [];
+        $find = function ($x) use (&$parent, &$find) {
+            while ($parent[$x] !== $x) { $parent[$x] = $parent[$parent[$x]]; $x = $parent[$x]; }
+            return $x;
+        };
+        foreach ($students as $s) $parent[$s->id] = $s->id;
+
+        $byMatricule = [];
+        $byIdentity  = [];
+        foreach ($students as $s) {
+            $m = $this->normMatricule($s->national_matricule);
+            if ($m !== '') $byMatricule[$m][] = $s->id;
+
+            $nk = $this->nameKey($s->last_name, $s->first_name);
+            $bd = $s->birth_date ? $s->birth_date->format('Y-m-d') : null;
+            if ($nk !== '' && $bd) $byIdentity[$nk . '|' . $bd][] = $s->id;
+        }
+        $reasons = [];
+        foreach ([[$byMatricule, 'Même matricule national'], [$byIdentity, 'Même nom et même date de naissance']] as [$map, $label]) {
+            foreach ($map as $ids) {
+                if (count($ids) < 2) continue;
+                $root = $find($ids[0]);
+                foreach ($ids as $id) {
+                    $r = $find($id);
+                    if ($r !== $root) { $parent[$r] = $root; }
+                }
+                $reasons[$find($ids[0])][$label] = true;
+            }
+        }
+
+        $groups = [];
+        foreach ($students as $s) $groups[$find($s->id)][] = $s;
+
+        $out = [];
+        foreach ($groups as $members) {
+            if (count($members) < 2) continue;
+            $cards = array_map(fn ($s) => $this->duplicateCard($s), $members);
+
+            // Quelles fiches peut-on supprimer sans rien perdre ?
+            foreach ($cards as &$card) {
+                $card['blockers'] = $this->deletionBlockers($card['id']);
+            }
+            unset($card);
+
+            // Fiche à conserver suggérée : celle qui porte une inscription / une classe, sinon la plus ancienne.
+            usort($cards, fn ($a, $b) =>
+                [$b['enrollments_count'], $b['class_name'] ? 1 : 0, -$b['id']] <=> [$a['enrollments_count'], $a['class_name'] ? 1 : 0, -$a['id']]);
+
+            $rootKey = $find($members[0]->id);
+            $out[] = [
+                'reason'            => implode(' · ', array_keys($reasons[$rootKey] ?? [])) ?: 'Fiches similaires',
+                'suggested_keep_id' => $cards[0]['id'],
+                'students'          => $cards,
+            ];
+        }
+
+        return response()->json(['status' => 'success', 'count' => count($out), 'groups' => $out]);
+    }
+
+    /** Ce qui empêche de supprimer une fiche sans perdre de données. */
+    private function deletionBlockers(int $studentId): array
+    {
+        $b = [];
+        $enr = Enrollment::withoutGlobalScope('viewingYear')
+            ->where('student_id', $studentId)->where('status', '!=', 'cancelled')->count();
+        if ($enr) $b[] = "{$enr} inscription(s) active(s)";
+
+        $student = Student::find($studentId);
+        if (!$student) return $b;
+
+        $checks = [
+            'canteenSubscriptions'  => 'abonnement(s) cantine',
+            'transportSubscriptions' => 'abonnement(s) transport',
+            'grades'                => 'note(s)',
+        ];
+        foreach ($checks as $rel => $label) {
+            try {
+                $n = $student->{$rel}()->count();
+                if ($n) $b[] = "{$n} {$label}";
+            } catch (\Throwable $e) {
+                // Relation/table indisponible : on ne bloque pas sur un contrôle impossible.
+            }
+        }
+        return $b;
+    }
+
+    /**
+     * Supprime (archive) une fiche en doublon. La fiche est mise en corbeille
+     * (soft delete), donc restaurable depuis la liste des élèves supprimés.
+     * POST /students/duplicates/resolve   { keep_id, remove_id }
+     */
+    public function resolveDuplicate(Request $request)
+    {
+        assert_writable_year();
+
+        $data = $request->validate([
+            'keep_id'   => ['required', 'integer', 'different:remove_id'],
+            'remove_id' => ['required', 'integer'],
+        ]);
+
+        $keep   = Student::find($data['keep_id']);
+        $remove = Student::find($data['remove_id']);
+
+        if (!$keep || !$remove) {
+            return response()->json(['status' => 'error', 'message' => 'Fiche introuvable.'], 404);
+        }
+
+        // Garde-fou : on ne supprime que si les deux fiches SONT bien des doublons.
+        $found = $this->findSimilarStudents([
+            'last_name' => $remove->last_name, 'first_name' => $remove->first_name,
+            'birth_date' => $remove->birth_date ? $remove->birth_date->format('Y-m-d') : null,
+            'national_matricule' => $remove->national_matricule,
+        ], $remove->id);
+
+        if (!$found['exact']->contains('id', $keep->id)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Ces deux fiches ne sont pas des doublons certains (même matricule, ou même nom et même date de naissance).",
+            ], 422);
+        }
+
+        $blockers = $this->deletionBlockers($remove->id);
+        if (!empty($blockers)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cette fiche ne peut pas être supprimée : elle porte " . implode(', ', $blockers)
+                           . ". Conservez plutôt cette fiche et supprimez l'autre.",
+            ], 422);
+        }
+
+        DB::transaction(function () use ($remove) {
+            $remove->update(['updated_by' => Auth::id() ?? null]);
+            $remove->delete();
+        });
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => "Le doublon {$remove->last_name} {$remove->first_name} ({$remove->matricule}) a été supprimé. Il reste récupérable dans la corbeille.",
+        ]);
     }
 
     public function search(Request $request)
@@ -747,6 +1077,8 @@ class StudentController extends Controller
                 'gender'           => $student->gender,
                 'class_id'         => $student->class_id,
                 'academic_year_id' => $student->academic_year_id,
+                'assignment_status' => $student->assignment_status ?? 'non_affecte',
+                'is_enrolled'       => (bool) $student->is_enrolled,
                 'classe'           => $student->classe,
                 'last_enrollment'  => $lastEnrollmentInfo,
 
