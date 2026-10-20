@@ -354,6 +354,13 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:enrollments.view')->middleware('module:enrollments');
     Route::post('/enrollments', [EnrollmentController::class, 'store'])
         ->middleware('permission:enrollments.create')->middleware('module:enrollments');
+
+    // mise a jour des donnees financieres d'une inscription (ex: frais de scolarité, frais annexes, remises, etc.)
+     Route::post('/enrollments/{id}/financial-correction', [EnrollmentController::class, 'correctFinancial'])
+    ->middleware('permission:enrollments.correct_financial')->middleware('module:enrollments');
+    Route::get('/enrollment-financial-corrections', [EnrollmentController::class, 'financialCorrectionsHistory'])
+    ->middleware('permission:enrollments.view')->middleware('module:enrollments');
+
     Route::get('/enrollments/{id}/receipt', [EnrollmentController::class, 'receiptPrint'])
         ->middleware('permission:enrollments.view')->middleware('module:enrollments');
     Route::post('/enrollments/{id}/validate', [EnrollmentController::class, 'validateEnrollment'])

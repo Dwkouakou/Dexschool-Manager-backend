@@ -37,7 +37,7 @@ class PermissionsSeeder extends Seeder
 
             // ═══ Scolarité ═══
             'students'         => ['view', 'create', 'edit', 'delete', 'restore', 'export', 'import'], // NOUVEAU: import
-            'enrollments'      => ['view', 'create', 'validate', 'cancel', 'reenroll'],
+            'enrollments'      => ['view', 'create', 'validate', 'cancel', 'reenroll', 'correct_financial'], // NOUVEAU : correct_financial
             'documents'        => ['view', 'upload', 'delete'],
 
             // ═══ Finances ═══

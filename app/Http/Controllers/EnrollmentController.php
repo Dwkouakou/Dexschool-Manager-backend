@@ -203,7 +203,8 @@ class EnrollmentController extends Controller
         $enrollments = Enrollment::with([
             'student',
             'classe.level',
-            'academicYear'
+            'academicYear',
+            'financial'
         ])->latest()->get();
 
         $formatted = $enrollments->map(function ($enr) {
@@ -218,6 +219,10 @@ class EnrollmentController extends Controller
                 'class'             => $enr->classe ? $enr->classe->name : 'N/A',
                 'cycle'             => ($enr->classe && $enr->classe->level) ? $enr->classe->level->name : 'N/A',
                 'academic_year'     => $enr->academicYear ? $enr->academicYear->name : 'N/A',
+                'financial'         => $enr->financial ? [
+                    'total_due'       => (int) $enr->financial->total_due,
+                    'initial_payment' => (int) $enr->financial->initial_payment,
+                ] : null,
                 'student'           => [
                     'id'         => $enr->student ? $enr->student->id : null,
                     'first_name' => $enr->student ? $enr->student->first_name : '',
@@ -454,6 +459,155 @@ class EnrollmentController extends Controller
         return response()->json($rows, 200);
     }
 
+    /**
+     * CORRECTION FINANCIÈRE d'une inscription — corrige les montants saisis à
+     * l'inscription (droit d'inscription, scolarité, annexes, réduction,
+     * reliquat reporté). Le total dû est RECALCULÉ par le serveur.
+     *
+     * Règles :
+     *  - réservé à la permission enrollments.correct_financial ;
+     *  - le montant déjà versé (initial_payment) est aussi corrigeable ; les
+     *    reçus individuels (table payments) ne sont PAS modifiés ;
+     *  - le montant versé ne peut pas dépasser le nouveau total dû ;
+     *  - motif obligatoire ; chaque correction écrit une ligne d'historique
+     *    (anciennes valeurs, nouvelles valeurs, auteur, date) jamais supprimée.
+     *
+     * POST /enrollments/{id}/financial-correction
+     */
+    public function correctFinancial(Request $request, string $id)
+    {
+        assert_writable_year();
+
+        $validated = $request->validate([
+            'registration_fee' => ['required', 'integer', 'min:0'],
+            'tuition_fee'      => ['required', 'integer', 'min:0'],
+            'annex_fee'        => ['required', 'integer', 'min:0'],
+            'discount_amount'  => ['required', 'integer', 'min:0'],
+            'previous_balance' => ['required', 'integer', 'min:0'],
+            'initial_payment'  => ['required', 'integer', 'min:0'],
+            'reason'           => ['required', 'string', 'min:5', 'max:500'],
+        ], [
+            'reason.required' => 'Le motif de la correction est obligatoire.',
+            'reason.min'      => 'Le motif de la correction doit contenir au moins 5 caractères.',
+        ]);
+
+        $enrollment = Enrollment::findOrFail($id);
+
+        if ($enrollment->status === 'cancelled') {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cette inscription est annulée : sa situation financière ne peut plus être corrigée.",
+            ], 422);
+        }
+
+        return DB::transaction(function () use ($validated, $enrollment) {
+            // Verrou : empêche qu'un encaissement concurrent fausse la comparaison.
+            $financial = EnrollmentFinancial::withoutGlobalScopes()
+                ->where('enrollment_id', $enrollment->id)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$financial) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "Aucune situation financière n'est rattachée à cette inscription.",
+                ], 422);
+            }
+
+            $fields = ['registration_fee', 'tuition_fee', 'annex_fee', 'discount_amount', 'previous_balance', 'initial_payment'];
+
+            $old = [];
+            $new = [];
+            foreach ($fields as $f) {
+                $old[$f] = (int) ($financial->{$f} ?? 0);
+                $new[$f] = (int) $validated[$f];
+            }
+            $old['total_due'] = (int) $financial->total_due;
+            $new['total_due'] = max(0, $new['registration_fee'] + $new['tuition_fee'] + $new['annex_fee']
+                                      + $new['previous_balance'] - $new['discount_amount']);
+
+            if ($old == $new) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "Aucune modification détectée : les montants saisis sont identiques aux montants actuels.",
+                ], 422);
+            }
+
+            $paid = $new['initial_payment'];
+            if ($paid > $new['total_due']) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => "Correction refusée : le montant versé (" . number_format($paid, 0, '', ' ')
+                        . " FCFA) ne peut pas dépasser le total dû (" . number_format($new['total_due'], 0, '', ' ') . " FCFA).",
+                ], 422);
+            }
+
+            $financial->forceFill($new)->save();
+
+            \App\Models\officeAdministration\EnrollmentFinancialCorrection::create([
+                'establishment_id' => $enrollment->establishment_id ?? current_establishment_id(),
+                'enrollment_id'    => $enrollment->id,
+                'student_id'       => $enrollment->student_id,
+                'academic_year_id' => $enrollment->academic_year_id,
+                'old_values'       => $old,
+                'new_values'       => $new,
+                'paid_at_time'     => $paid,
+                'reason'           => trim($validated['reason']),
+                'corrected_by'     => Auth::id(),
+                'corrected_at'     => now(),
+            ]);
+
+            $remaining = max(0, $new['total_due'] - $paid);
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => "Situation financière corrigée. Nouveau total dû : " . number_format($new['total_due'], 0, '', ' ')
+                    . " FCFA — reste à payer : " . number_format($remaining, 0, '', ' ') . " FCFA.",
+                'financial' => $new,
+            ], 200);
+        });
+    }
+
+    /**
+     * Historique des corrections financières.
+     * GET /enrollment-financial-corrections[?enrollment_id=]
+     */
+    public function financialCorrectionsHistory(Request $request)
+    {
+        $query = \App\Models\officeAdministration\EnrollmentFinancialCorrection::with([
+                'student', 'author', 'enrollment',
+            ])
+            ->orderByDesc('corrected_at')
+            ->orderByDesc('id');
+
+        if ($request->filled('enrollment_id')) {
+            $query->where('enrollment_id', $request->enrollment_id);
+        } else {
+            $query->where('academic_year_id', current_viewing_year_id());
+        }
+
+        $rows = $query->limit(500)->get()->map(function ($c) {
+            return [
+                'id'                => $c->id,
+                'corrected_at'      => $c->corrected_at ? $c->corrected_at->toISOString() : null,
+                'reason'            => $c->reason,
+                'author'            => $c->author?->name ?? '—',
+                'old_values'        => $c->old_values,
+                'new_values'        => $c->new_values,
+                'paid_at_time'      => (int) $c->paid_at_time,
+                'enrollment_number' => $c->enrollment?->enrollment_number,
+                'student'           => [
+                    'id'         => $c->student?->id,
+                    'first_name' => $c->student?->first_name ?? '',
+                    'last_name'  => $c->student?->last_name ?? '',
+                    'matricule'  => $c->student?->matricule ?? '',
+                ],
+            ];
+        });
+
+        return response()->json($rows, 200);
+    }
+
     public function show(string $id)
     {
         try {
@@ -513,12 +667,13 @@ class EnrollmentController extends Controller
                     'tuition_fee'      => (int) $enrollment->financial->tuition_fee,
                     'annex_fee'        => (int) $enrollment->financial->annex_fee,
                     'discount_amount'  => (int) $enrollment->financial->discount_amount,
+                    'previous_balance' => (int) ($enrollment->financial->previous_balance ?? 0),
                     'total_due'        => (int) $enrollment->financial->total_due,
                     'initial_payment'  => (int) $enrollment->financial->initial_payment,
                     'payment_method'   => $enrollment->financial->payment_method,
                 ] : [
                     'registration_fee' => 0, 'tuition_fee' => 0, 'annex_fee' => 0,
-                    'discount_amount' => 0, 'total_due' => 0, 'initial_payment' => 0,
+                    'discount_amount' => 0, 'previous_balance' => 0, 'total_due' => 0, 'initial_payment' => 0,
                     'payment_method' => 'none'
                 ]
             ];

@@ -206,6 +206,7 @@ class PermissionCategories
         'validate'         => 'Valider',
         'cancel'           => 'Annuler',
         'reenroll'         => 'Réinscrire',
+        'correct_financial' => 'Corriger la situation financière',
         'upload'           => 'Téléverser',
         'print'            => 'Imprimer',
         'refund'           => 'Rembourser',
