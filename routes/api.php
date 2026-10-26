@@ -30,6 +30,7 @@ use App\Http\Controllers\TransportController;
 use App\Http\Controllers\AffiliatedEstablishmentController;
 use App\Http\Controllers\EstablishmentActivityLogController;
 use App\Http\Controllers\PasswordResetController;
+use App\Http\Controllers\EnrollmentFeeSettingsController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -210,6 +211,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/settings/establishment', [EstablishmentSettingsController::class, 'update'])
         ->middleware('permission:settings.edit')->middleware('module:settings'); // POST — même raison que /me/profile (upload logo)
 
+        // paramettre des frais d'inscription et de scolarité par niveau
+    Route::get('/settings/enrollment-fees', [EnrollmentFeeSettingsController::class, 'index'])->middleware('module:settings');
+    Route::put('/settings/enrollment-fees', [EnrollmentFeeSettingsController::class, 'upsert'])
+        ->middleware('permission:settings.edit')->middleware('module:settings');
+    Route::delete('/settings/enrollment-fees/{id}', [EnrollmentFeeSettingsController::class, 'destroy'])
+        ->middleware('permission:settings.edit')->middleware('module:settings');
+    // Pour les étapes inscription / réinscription (phase suivante)
+    Route::get('/enrollment-fees', [EnrollmentFeeSettingsController::class, 'lookup']);
+
     // Profil PERSONNEL de l'utilisateur connecté — jamais de permission ici,
     // tout compte doit pouvoir consulter/modifier ses propres informations.
     Route::get('/me/profile', [ProfileController::class, 'show']);
@@ -356,6 +366,8 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:enrollments.create')->middleware('module:enrollments');
 
     // mise a jour des donnees financieres d'une inscription (ex: frais de scolarité, frais annexes, remises, etc.)
+    Route::get('/enrollments-pending-students', [EnrollmentController::class, 'pendingStudents'])
+    ->middleware('permission:enrollments.view')->middleware('module:enrollments');
      Route::post('/enrollments/{id}/financial-correction', [EnrollmentController::class, 'correctFinancial'])
     ->middleware('permission:enrollments.correct_financial')->middleware('module:enrollments');
     Route::get('/enrollment-financial-corrections', [EnrollmentController::class, 'financialCorrectionsHistory'])

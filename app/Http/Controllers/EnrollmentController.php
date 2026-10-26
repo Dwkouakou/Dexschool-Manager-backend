@@ -68,6 +68,20 @@ class EnrollmentController extends Controller
             ], 422);
         }
 
+        // ─── TARIFS CONFIGURÉS (Paramètres › Gestion financière) : si une grille
+        // existe pour (niveau de la classe, statut d'affectation de l'élève),
+        // le serveur impose droit d'inscription et scolarité — la valeur
+        // envoyée par le navigateur est ignorée. Sinon, saisie manuelle conservée.
+        $tariff = \App\Models\EstablishmentLevelFee::where('establishment_id', current_establishment_id())
+            ->where('level_id', $classe->level_id)
+            ->where('assignment_status', $currentStudent->assignment_status ?: 'non_affecte')
+            ->first();
+
+        if ($tariff) {
+            $validated['registration_fee'] = (int) $tariff->registration_fee;
+            $validated['tuition_fee']      = (int) $tariff->tuition_fee;
+        }
+
         $previousBalance = 0;
 
         if ($validated['type'] === 're_enrollment') {
@@ -608,6 +622,38 @@ class EnrollmentController extends Controller
         return response()->json($rows, 200);
     }
 
+    /**
+     * Dossiers élèves créés mais jamais inscrits (aucune inscription non annulée,
+     * toutes années confondues) : ce sont les élèves « à inscrire ».
+     * GET /enrollments-pending-students
+     */
+    public function pendingStudents()
+    {
+        $students = Student::with('classe')->where('is_active', 1)
+            ->whereDoesntHave('enrollments', function ($q) {
+                $q->withoutGlobalScope('viewingYear')->where('status', '!=', 'cancelled');
+            })
+            ->orderByDesc('id')
+            ->get();
+
+        return response()->json([
+            'count'    => $students->count(),
+            'students' => $students->map(fn ($s) => [
+                'id'                => $s->id,
+                'first_name'        => $s->first_name,
+                'last_name'         => $s->last_name,
+                'matricule'         => $s->matricule,
+                'gender'            => $s->gender,
+                'photo'             => $s->photo,
+                'assignment_status' => $s->assignment_status ?? 'non_affecte',
+                'created_at'        => $s->created_at ? $s->created_at->toISOString() : null,
+                'classe'            => $s->classe ? ['id' => $s->classe->id, 'name' => $s->classe->name] : null,
+                'enrollments_exists'=> false,
+                'enrollments_count' => 0,
+            ])->values(),
+        ], 200);
+    }
+
     public function show(string $id)
     {
         try {
@@ -791,49 +837,7 @@ class EnrollmentController extends Controller
             ];
             $moyenPaiement = $methods[$financial?->payment_method] ?? '—';
 
-            return "
-            <!DOCTYPE html>
-            <html lang='fr'>
-            <head>
-                <meta charset='UTF-8'>
-                <title>Reçu d'inscription - {$enrollment->enrollment_number}</title>
-                <style>
-                    body { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; color: #222; background: #fff; padding: 20px; }
-                    .receipt { width: 190mm; border: 2px solid #3D2E22; border-radius: 10px; padding: 25px; margin: 0 auto; box-sizing: border-box; }
-                    .header { display: flex; align-items: center; gap: 14px; padding-bottom: 16px; margin-bottom: 20px; border-bottom: 3px double #3D2E22; }
-                    .header img { width: 56px; height: 56px; object-fit: cover; border-radius: 10px; border: 1px solid #ddd; flex-shrink: 0; }
-                    .header .school-name { font-size: 17pt; font-weight: 800; color: #3D2E22; margin: 0; }
-                    .header .school-sub { font-size: 9pt; color: #999; margin: 3px 0 0; }
-                    .receipt-title { text-align: center; margin: 10px 0 20px; }
-                    .receipt-title h2 { font-size: 15pt; letter-spacing: 1px; color: #E67E22; margin: 0; }
-                    .meta-row { display: flex; justify-content: space-between; font-size: 11pt; margin-bottom: 6px; }
-                    .meta-row .label { font-weight: 700; color: #555; }
-                    .section-title { font-size: 10.5pt; font-weight: 700; background: #FEF0E6; color: #3D2E22; padding: 6px 10px; border-left: 4px solid #E67E22; margin: 18px 0 10px; }
-                    table.info-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
-                    table.info-table td { padding: 6px 4px; font-size: 11pt; }
-                    table.info-table td.label { font-weight: 700; color: #555; width: 35%; }
-                    .student-identity-row { display: flex; gap: 16px; align-items: stretch; }
-                    .student-photo-box { width: 64px; height: 64px; flex-shrink: 0; border-radius: 10px; border: 1px solid #ddd; background: #F5EFE9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-                    .student-photo-box img { width: 100%; height: 100%; object-fit: cover; }
-                    .student-photo-initials { font-size: 15pt; font-weight: 800; color: #BBA98A; }
-                    table.fin-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-                    table.fin-table th, table.fin-table td { border: 1px solid #ddd; padding: 8px 10px; font-size: 11pt; }
-                    table.fin-table th { background: #FAF7F5; text-align: left; }
-                    table.fin-table td { text-align: right; }
-                    .total-row td { font-weight: 800; background: #F5EFE9; }
-                    .remaining-row td { font-weight: 800; color: " . ($remaining > 0 ? "#C0395A" : "#27AE60") . "; font-size: 13pt; }
-                    .legal-note { margin-top: 16px; font-size: 9.5pt; color: #888; font-style: italic; text-align: center; }
-                    .signature-zone { margin-top: 50px; display: flex; justify-content: flex-end; }
-                    .signature-box { text-align: center; width: 240px; }
-                    .signature-box .role { font-weight: 700; font-size: 10.5pt; margin-bottom: 45px; }
-                    .signature-box .name { font-size: 10pt; color: #555; border-top: 1px solid #999; padding-top: 6px; }
-                    @media print {
-                        body { padding: 0; }
-                        .receipt { border: 2px solid #3D2E22; }
-                    }
-                </style>
-            </head>
-            <body onload='window.print();'>
+            $receiptBlock = "
                 <div class='receipt'>
 
                     <div class='header'>
@@ -847,6 +851,7 @@ class EnrollmentController extends Controller
                     <div class='receipt-title'>
                         <h2>REÇU D'INSCRIPTION</h2>
                     </div>
+                    <div class='copy-tag'>{{COPY}}</div>
 
                     <div class='meta-row'>
                         <span><span class='label'>N° Inscription :</span> {$enrollment->enrollment_number}</span>
@@ -878,6 +883,11 @@ class EnrollmentController extends Controller
                                 <td class='label'>Genre :</td>
                                 <td>" . ($student->gender === 'F' ? 'Féminin' : 'Masculin') . "</td>
                             </tr>
+                            <tr>
+                                <td class='label'>Statut :</td>
+                                <td>" . ($student->assignment_status === 'affecte' ? 'Affecté' : 'Non affecté') . "</td>
+                                <td></td><td></td>
+                            </tr>
                         </table>
                     </div>
 
@@ -902,9 +912,61 @@ class EnrollmentController extends Controller
                     </div>
 
                 </div>
-            </body>
-            </html>
             ";
+
+            $head = "
+            <!DOCTYPE html>
+            <html lang='fr'>
+            <head>
+                <meta charset='UTF-8'>
+                <title>Reçu d'inscription - {$enrollment->enrollment_number}</title>
+                <style>
+                    body { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; color: #222; background: #fff; padding: 20px; }
+                    @page { size: A4 landscape; margin: 6mm; }
+                    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                    .sheet { display: flex; gap: 6mm; align-items: flex-start; justify-content: center; }
+                    .cut { border-left: 1px dashed #999; align-self: stretch; }
+                    .copy-tag { text-align: center; font-size: 9pt; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 1px; margin: -10px 0 12px; }
+                    .receipt { width: 190mm; zoom: 0.68; border: 2px solid #3D2E22; border-radius: 10px; padding: 25px; box-sizing: border-box; flex-shrink: 0; }
+                    .header { display: flex; align-items: center; gap: 14px; padding-bottom: 16px; margin-bottom: 20px; border-bottom: 3px double #3D2E22; }
+                    .header img { width: 56px; height: 56px; object-fit: cover; border-radius: 10px; border: 1px solid #ddd; flex-shrink: 0; }
+                    .header .school-name { font-size: 17pt; font-weight: 800; color: #3D2E22; margin: 0; }
+                    .header .school-sub { font-size: 9pt; color: #999; margin: 3px 0 0; }
+                    .receipt-title { text-align: center; margin: 10px 0 20px; }
+                    .receipt-title h2 { font-size: 15pt; letter-spacing: 1px; color: #E67E22; margin: 0; }
+                    .meta-row { display: flex; justify-content: space-between; font-size: 11pt; margin-bottom: 6px; }
+                    .meta-row .label { font-weight: 700; color: #555; }
+                    .section-title { font-size: 10.5pt; font-weight: 700; background: #FEF0E6; color: #3D2E22; padding: 6px 10px; border-left: 4px solid #E67E22; margin: 18px 0 10px; }
+                    table.info-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+                    table.info-table td { padding: 6px 4px; font-size: 11pt; }
+                    table.info-table td.label { font-weight: 700; color: #555; width: 35%; }
+                    .student-identity-row { display: flex; gap: 16px; align-items: stretch; }
+                    .student-photo-box { width: 64px; height: 64px; flex-shrink: 0; border-radius: 10px; border: 1px solid #ddd; background: #F5EFE9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+                    .student-photo-box img { width: 100%; height: 100%; object-fit: cover; }
+                    .student-photo-initials { font-size: 15pt; font-weight: 800; color: #BBA98A; }
+                    table.fin-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+                    table.fin-table th, table.fin-table td { border: 1px solid #ddd; padding: 8px 10px; font-size: 11pt; }
+                    table.fin-table th { background: #FAF7F5; text-align: left; }
+                    table.fin-table td { text-align: right; }
+                    .total-row td { font-weight: 800; background: #F5EFE9; }
+                    .remaining-row td { font-weight: 800; color: " . ($remaining > 0 ? "#C0395A" : "#27AE60") . "; font-size: 13pt; }
+                    .legal-note { margin-top: 16px; font-size: 9.5pt; color: #888; font-style: italic; text-align: center; }
+                    .signature-zone { margin-top: 50px; display: flex; justify-content: flex-end; }
+                    .signature-box { text-align: center; width: 240px; }
+                    .signature-box .role { font-weight: 700; font-size: 10.5pt; margin-bottom: 45px; }
+                    .signature-box .name { font-size: 10pt; color: #555; border-top: 1px solid #999; padding-top: 6px; }
+                    @media print {
+                        body { padding: 0; }
+                    }
+                </style>
+            </head>
+            <body onload='window.print();'>";
+
+            return $head . "<div class='sheet'>"
+                . str_replace('{{COPY}}', 'Exemplaire établissement', $receiptBlock)
+                . "<div class='cut'></div>"
+                . str_replace('{{COPY}}', 'Exemplaire parent / élève', $receiptBlock)
+                . "</div></body></html>";
 
         } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
             return "<html><body><p style='color:red; font-family:sans-serif; text-align:center; margin-top:50px;'>Erreur : Inscription introuvable.</p></body></html>";
