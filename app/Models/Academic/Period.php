@@ -23,6 +23,7 @@ class Period extends Model
         'start_date',
         'end_date',
         'is_active',
+        'coefficient'
     ];
 
     protected $casts = [
@@ -30,6 +31,7 @@ class Period extends Model
         'academic_year_id' => 'integer',
         'start_date' => 'date',
         'end_date' => 'date',
+        'coefficient' => 'decimal:2'
     ];
 
     // Relation avec l'année scolaire

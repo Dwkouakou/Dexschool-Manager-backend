@@ -9,6 +9,7 @@ use App\Models\Academic\Period;
 use App\Models\Academic\PeriodAverage;
 use App\Models\Academic\SubjectAverage;
 use App\Models\officeAdministration\Enrollment;
+use App\Services\SubjectAverageCalculator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -213,34 +214,15 @@ class ResultController extends Controller
         DB::beginTransaction();
 
         try {
-            // --- PARTIE A : CALCUL DES MOYENNES PAR MATIÈRE ---
-            foreach ($students as $studentId) {
-                foreach ($attributions as $attr) {
-                    // On récupère toutes les notes de l'élève pour cette matière et ce trimestre
-                    $scores = Grade::where('student_id', $studentId)
-                        ->whereHas('evaluation', function($query) use ($classeId, $attr, $activePeriod) {
-                            $query->where('classe_id', $classeId)
-                                  ->where('subject_id', $attr->subject_id)
-                                  ->where('period_id', $activePeriod->id);
-                        })
-                        ->where('is_absent', false)
-                        ->whereNotNull('score')
-                        ->pluck('score');
+            // --- PARTIE A : MOYENNES PAR MATIÈRE (pondérées par le poids des notes, sous-matières incluses) ---
+            foreach ($attributions as $attr) {
+                $averages = SubjectAverageCalculator::forSubjectTree((int) $classeId, (int) $attr->subject_id, (int) $activePeriod->id);
 
-                    if ($scores->count() > 0) {
-                        $subjectAvg = $scores->average();
-
-                        // 🟢 CORRECTION ULTRA-SÉCURISÉE : Recherche stricte des 3 clés uniques
+                foreach ($students as $studentId) {
+                    if (isset($averages[$studentId])) {
                         SubjectAverage::updateOrCreate(
-                            [
-                                'student_id' => (int)$studentId,
-                                'subject_id' => (int)$attr->subject_id,
-                                'period_id'  => (int)$activePeriod->id,
-                            ],
-                            [
-                                'classe_id'  => (int)$classeId,
-                                'average'    => round($subjectAvg, 2)
-                            ]
+                            ['student_id' => (int) $studentId, 'subject_id' => (int) $attr->subject_id, 'period_id' => (int) $activePeriod->id],
+                            ['classe_id' => (int) $classeId, 'average' => $averages[$studentId]]
                         );
                     }
                 }

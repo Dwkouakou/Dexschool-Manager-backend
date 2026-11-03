@@ -3,6 +3,7 @@
 use App\Http\Controllers\AcademicYearsController;
 use App\Http\Controllers\AdminApiController;
 use App\Http\Controllers\Api\Academic\EvaluationController;
+use App\Http\Controllers\Api\Academic\GradeBookController;
 use App\Http\Controllers\Api\Academic\ReportCardController;
 use App\Http\Controllers\Api\Academic\ResultController;
 use App\Http\Controllers\Api\ClasseController;
@@ -24,8 +25,11 @@ use App\Http\Controllers\StudentDocumentController;
 use App\Http\Controllers\StudentImportController;
 use App\Http\Controllers\StudentParentController;
 use App\Http\Controllers\SubjectController;
+use App\Http\Controllers\SubjectLevelSettingController;
 use App\Http\Controllers\SuperAdminApiController;
 use App\Http\Controllers\TeacherAttributionController;
+use App\Http\Controllers\ClassTimetableController;
+use App\Http\Controllers\TimeSlotController;
 use App\Http\Controllers\TransportController;
 use App\Http\Controllers\AffiliatedEstablishmentController;
 use App\Http\Controllers\EstablishmentActivityLogController;
@@ -735,16 +739,70 @@ Route::middleware('auth:sanctum')->group(function () {
     // Exemple d'appel React : ApiRequest('/academic/subjects', { method: 'POST', body: ... })
     Route::post('/academic/subjects', [SubjectController::class, 'store'])
         ->middleware('permission:subjects.create')->middleware('module:subjects');
+
+        // nouvelle route module matieres
+    Route::get('/academic/subject-settings/levels', [SubjectLevelSettingController::class, 'levels'])
+        ->middleware('permission:subjects.view')->middleware('module:subjects');
+    Route::get('/academic/subject-settings', [SubjectLevelSettingController::class, 'show'])
+        ->middleware('permission:subjects.view')->middleware('module:subjects');
+    Route::put('/academic/subject-settings/coefficients', [SubjectLevelSettingController::class, 'saveCoefficients'])
+        ->middleware('permission:subjects.edit')->middleware('module:subjects');
+    Route::put('/academic/subject-settings/report', [SubjectLevelSettingController::class, 'saveReport'])
+        ->middleware('permission:subjects.edit')->middleware('module:subjects');
+    Route::get('/academic/subjects/{id}/coefficients', [SubjectLevelSettingController::class, 'subjectCoefficients'])
+        ->middleware('permission:subjects.view')->middleware('module:subjects');
+        // nouvelle route module matieres
+
     Route::put('/academic/subjects/{id}',    [SubjectController::class, 'update'])
         ->middleware('permission:subjects.edit')->middleware('module:subjects');
     Route::delete('/academic/subjects/{id}', [SubjectController::class, 'destroy'])
         ->middleware('permission:subjects.delete')->middleware('module:subjects');
 
+    Route::get('/academic/class-timetables', [ClassTimetableController::class, 'index'])
+    ->middleware('permission:teachers.view')->middleware('module:hr_teachers');
+    Route::post('/academic/class-timetables/publish', [ClassTimetableController::class, 'publish'])   // AVANT les routes {classeId}
+        ->middleware('permission:teachers.assign_classes')->middleware('module:hr_teachers');
+    Route::get('/academic/class-timetables/{classeId}', [ClassTimetableController::class, 'show'])
+        ->middleware('permission:teachers.view')->middleware('module:hr_teachers');
+    Route::put('/academic/class-timetables/{classeId}', [ClassTimetableController::class, 'save'])
+        ->middleware('permission:teachers.assign_classes')->middleware('module:hr_teachers');
+    Route::delete('/academic/class-timetables/{classeId}', [ClassTimetableController::class, 'reset'])
+        ->middleware('permission:teachers.assign_classes')->middleware('module:hr_teachers');
+
+
+    // ── Plages horaires & jours de cours ──
+    Route::get('/academic/time-slots', [TimeSlotController::class, 'index'])
+        ->middleware('permission:teachers.view')->middleware('module:hr_teachers');
+
+    Route::put('/academic/time-slots-days', [TimeSlotController::class, 'saveDays'])
+        ->middleware('permission:teachers.assign_classes')->middleware('module:hr_teachers');
+
+    Route::post('/academic/time-slots', [TimeSlotController::class, 'store'])
+        ->middleware('permission:teachers.assign_classes')->middleware('module:hr_teachers');
+
+    Route::put('/academic/time-slots/{id}', [TimeSlotController::class, 'update'])
+        ->middleware('permission:teachers.assign_classes')->middleware('module:hr_teachers');
+
+    Route::delete('/academic/time-slots/{id}', [TimeSlotController::class, 'destroy'])
+        ->middleware('permission:teachers.assign_classes')->middleware('module:hr_teachers');
     // ATTRIBUTION DES PROFS A UNE CLASSE ET MATIERE AVEC UN COEFFICIENT BIEN SPECIFIQUE 
 
     // Route 1 : Récupérer le personnel ayant le rôle "enseignant" (pour vos dropdowns/listes React)
     Route::get('/academic/teachers', [TeacherAttributionController::class, 'getTeachers'])
         ->middleware('permission:teachers.view')->middleware('module:hr_teachers');
+
+    Route::get('/academic/teachers-overview', [TeacherAttributionController::class, 'overview'])
+    ->middleware('permission:teachers.view');
+
+    Route::post('/academic/attributions/clear', [TeacherAttributionController::class, 'clearAttributions'])
+    ->middleware('permission:teacher_attributions.delete');
+
+    Route::get('/academic/teachers/{id}/attributions-board', [TeacherAttributionController::class, 'board'])
+    ->middleware('permission:teachers.view');
+
+    Route::post('/academic/teachers/{id}/attributions-sync', [TeacherAttributionController::class, 'syncAttributions'])
+    ->middleware('permission:teacher_attributions.create');
+
     // REACT : ApiRequest(`/academic/teachers/${teacherId}`)
     Route::get('/academic/teachers/{id}', [TeacherAttributionController::class, 'showTeacher'])
         ->middleware('permission:teachers.view')->middleware('module:hr_teachers');
@@ -762,8 +820,8 @@ Route::middleware('auth:sanctum')->group(function () {
     // Laravel n'utilisera que la PREMIÈRE définition rencontrée — celle-ci
     // ne sera donc jamais atteinte. Pas corrigé ici (changement de routing,
     // pas de sécurité) mais à nettoyer un jour pour éviter la confusion.
-    Route::get('/academic/subjects', [TeacherAttributionController::class, 'getSubjects'])
-        ->middleware('permission:subjects.view')->middleware('module:subjects');
+    // Route::get('/academic/subjects', [TeacherAttributionController::class, 'getSubjects'])
+    //     ->middleware('permission:subjects.view')->middleware('module:subjects');
     
     
     // REACT : ApiRequest(`/academic/teachers/${teacherId}/attributions`)
@@ -778,18 +836,13 @@ Route::middleware('auth:sanctum')->group(function () {
     // ─────────────────────────────────────────────────────────────────────────
     
     // 1. Gestion des Évaluations (Devoirs, Examens)
-    Route::get('/evaluations', [EvaluationController::class, 'index'])
-        ->middleware('permission:evaluations.view')->middleware('module:grades'); // 🌟 AJOUTÉ : Lister les évaluations
-    Route::post('/evaluations', [EvaluationController::class, 'storeEvaluation'])
-        ->middleware('permission:evaluations.create')->middleware('module:grades');
-    Route::get('/evaluations/{id}', [EvaluationController::class, 'show'])
-        ->middleware('permission:evaluations.view')->middleware('module:grades'); // 🌟 AJOUTÉ : Voir les détails d'une évaluation
-    
-    // 2. Gestion des Notes (Grades)
-    Route::get('/evaluations/{id}/grades', [EvaluationController::class, 'getGradesStructure'])
-        ->middleware('permission:grades.view')->middleware('module:grades'); // 🌟 AJOUTÉ : Récupérer les élèves + notes pour affichage dans le formulaire
-    Route::post('/evaluations/{id}/grades', [EvaluationController::class, 'submitGrades'])
-        ->middleware('permission:grades.enter')->middleware('module:grades');
+    Route::get('/gradebook/context',  [GradeBookController::class, 'context'])->middleware('permission:evaluations.view')->middleware('module:grades');
+    Route::get('/gradebook/subjects', [GradeBookController::class, 'subjects'])->middleware('permission:evaluations.view')->middleware('module:grades');
+    Route::get('/gradebook/sheet',    [GradeBookController::class, 'sheet'])->middleware('permission:grades.view')->middleware('module:grades');
+    Route::post('/gradebook/notes',   [GradeBookController::class, 'storeNotes'])->middleware('permission:grades.enter')->middleware('module:grades');
+    Route::post('/gradebook/bonus',   [GradeBookController::class, 'saveBonus'])->middleware('permission:grades.enter')->middleware('module:grades');
+    Route::put('/gradebook/evaluations/{evaluationId}/students/{studentId}',    [GradeBookController::class, 'updateGrade'])->middleware('permission:grades.enter')->middleware('module:grades');
+    Route::delete('/gradebook/evaluations/{evaluationId}/students/{studentId}', [GradeBookController::class, 'deleteGrade'])->middleware('permission:grades.enter')->middleware('module:grades');
 
 
     // _______________________________________________________________
