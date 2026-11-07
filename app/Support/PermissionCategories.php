@@ -215,6 +215,8 @@ class PermissionCategories
         'duplicate'        => 'Dupliquer',
         'enter'            => 'Saisir',
         'publish'          => 'Publier',
+        'view_all'         => 'Voir toutes les classes',
+        'close'            => 'Clôturer / bloquer les périodes',
         'calculate'        => 'Calculer',
         'collect_payment'  => 'Encaisser',
         'manage'           => 'Gérer',

@@ -4,6 +4,7 @@ use App\Http\Controllers\AcademicYearsController;
 use App\Http\Controllers\AdminApiController;
 use App\Http\Controllers\Api\Academic\EvaluationController;
 use App\Http\Controllers\Api\Academic\GradeBookController;
+use App\Http\Controllers\PeriodClosureController;
 use App\Http\Controllers\Api\Academic\ReportCardController;
 use App\Http\Controllers\Api\Academic\ResultController;
 use App\Http\Controllers\Api\ClasseController;
@@ -17,10 +18,12 @@ use App\Http\Controllers\LibraryController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PeriodController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\DashboardProfileController;
 use App\Http\Controllers\ReportingController;
 use App\Http\Controllers\RolePermissionController;
 use App\Http\Controllers\StaffAccountController;
 use App\Http\Controllers\StudentController;
+use App\Http\Controllers\TeacherStudentController;
 use App\Http\Controllers\StudentDocumentController;
 use App\Http\Controllers\StudentImportController;
 use App\Http\Controllers\StudentParentController;
@@ -233,7 +236,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // connectés : c'est CE endpoint qui permet au frontend de savoir quels
     // boutons afficher. Le gater lui-même casserait toute l'interface.
     Route::get('/me/permissions', [ProfileController::class, 'permissions']);
-
+    Route::get('/me/dashboard', [DashboardProfileController::class, 'show']);
     // ─── AJOUT : carte des modules activés pour l'établissement de
     // l'utilisateur connecté — même logique que /me/permissions ci-dessus,
     // accessible à tout compte connecté, sans permission spécifique
@@ -288,6 +291,7 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:classes.delete')->middleware('module:academic_structure');
     
     // Gestion des eleves 
+    Route::get('/teacher/students', [TeacherStudentController::class, 'index'])->middleware('permission:students.view')->middleware('module:students');
     Route::post("/CreateStudents", [StudentController::class, "store"])
         ->middleware('permission:students.create')->middleware('module:students');
     Route::get("/students", [StudentController::class, "index"])
@@ -841,8 +845,17 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/gradebook/sheet',    [GradeBookController::class, 'sheet'])->middleware('permission:grades.view')->middleware('module:grades');
     Route::post('/gradebook/notes',   [GradeBookController::class, 'storeNotes'])->middleware('permission:grades.enter')->middleware('module:grades');
     Route::post('/gradebook/bonus',   [GradeBookController::class, 'saveBonus'])->middleware('permission:grades.enter')->middleware('module:grades');
+    // ── Portée enseignant / administrateur (api.php) ──
+    Route::get('/gradebook/scope', [GradeBookController::class, 'scope'])->middleware('permission:evaluations.view')->middleware('module:grades');
     Route::put('/gradebook/evaluations/{evaluationId}/students/{studentId}',    [GradeBookController::class, 'updateGrade'])->middleware('permission:grades.enter')->middleware('module:grades');
     Route::delete('/gradebook/evaluations/{evaluationId}/students/{studentId}', [GradeBookController::class, 'deleteGrade'])->middleware('permission:grades.enter')->middleware('module:grades');
+
+    // ── Clôture des périodes ──
+
+    Route::get('/grades/period-closures', [PeriodClosureController::class, 'index'])->middleware('permission:grades.close')->middleware('module:grades');
+    Route::post('/grades/period-closures/{id}/teachers-lock', [PeriodClosureController::class, 'toggleTeachersLock'])->middleware('permission:grades.close')->middleware('module:grades');
+    Route::post('/grades/period-closures/{id}/close', [PeriodClosureController::class, 'toggleClose'])->middleware('permission:grades.close')->middleware('module:grades');
+
 
 
     // _______________________________________________________________

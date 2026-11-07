@@ -14,6 +14,7 @@ use App\Models\Personel\Employee;
 use App\Models\Academic\Student;
 use App\Services\SubjectAverageCalculator as Calc;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
@@ -30,6 +31,49 @@ class GradeBookController extends Controller
         'devoir'    => ['devoir',        20, 'Devoir'],
     ];
 
+    /** @var array|null Cache de la portée de l'utilisateur pour la requête en cours */
+    private ?array $access = null;
+
+    /**
+     * Portée de l'utilisateur connecté :
+     *  - full = true  → administrateur (rôle « admin » ou permission grades.view_all) : toutes les classes/matières
+     *  - full = false → enseignant : uniquement ses attributions (employé relié via employees.user_id)
+     */
+    private function access(): array
+    {
+        if ($this->access) return $this->access;
+
+        $user = Auth::user();
+        $full = $user && ($user->roles()->where('slug', 'admin')->exists() || $user->can('grades.view_all'));
+        $employee = $user ? Employee::where('user_id', $user->id)->first() : null;
+
+        return $this->access = ['full' => (bool) $full, 'employee' => $employee];
+    }
+
+    private function noTeacherProfile()
+    {
+        return $this->fail("Votre compte n'est relié à aucun dossier enseignant.", 403);
+    }
+
+    /** Une matière « feuille » de cette classe est-elle accessible à l'utilisateur ? */
+    private function canAccess(int $classeId, int $subjectId): bool
+    {
+        $classe = Classe::find($classeId);
+        return $classe && $this->leafSubjects($classe)->contains('id', $subjectId);
+    }
+
+    /** GET /gradebook/scope */
+    public function scope()
+    {
+        $a = $this->access();
+        $emp = $a['employee'];
+
+        return response()->json([
+            'full_access' => $a['full'],
+            'teacher'     => $emp ? ['id' => $emp->id, 'name' => trim($emp->last_name . ' ' . $emp->first_name)] : null,
+        ], 200);
+    }
+
     private function fail(string $msg, int $code = 422)
     {
         return response()->json(['status' => 'error', 'message' => $msg, 'errors' => ['_' => [$msg]]], $code);
@@ -38,7 +82,10 @@ class GradeBookController extends Controller
     /** Matières « feuilles » notables d'une classe : matières attribuées sans sous-matière + les sous-matières des autres. */
     private function leafSubjects(Classe $classe)
     {
-        $atts  = ClassroomSubjectTeacher::where('classe_id', $classe->id)->get()->keyBy('subject_id');
+        $access = $this->access();
+        $atts  = ClassroomSubjectTeacher::where('classe_id', $classe->id)
+            ->when(!$access['full'], fn ($q) => $q->where('employee_id', $access['employee']->id ?? 0))
+            ->get()->keyBy('subject_id');
         $mains = Subject::whereIn('id', $atts->keys())->where('is_active', true)->get();
         $kids  = Subject::whereIn('parent_id', $mains->pluck('id'))->where('is_active', true)->get()->groupBy('parent_id');
         $teachers = Employee::whereIn('id', $atts->pluck('employee_id'))->get()->keyBy('id');
@@ -62,6 +109,18 @@ class GradeBookController extends Controller
         return $rows->values();
     }
 
+    /** Bloque la saisie si la période est clôturée (tout le monde) ou verrouillée aux professeurs. Retourne une réponse d'erreur ou null. */
+    private function periodGuard($period)
+    {
+        if ($period->is_closed) {
+            return $this->fail("La période « {$period->name} » est clôturée : la saisie des notes n'est plus possible.", 423);
+        }
+        if ($period->teachers_locked && !$this->access()['full']) {
+            return $this->fail("La saisie des notes est bloquée pour la période « {$period->name} ». Contactez l'administration.", 423);
+        }
+        return null;
+    }
+
     /** Charge classe + période + matière (tous filtrés par le scope établissement/année) ou renvoie une erreur. */
     private function resolve(Request $request)
     {
@@ -72,13 +131,16 @@ class GradeBookController extends Controller
         ]);
         if ($v->fails()) return ['error' => response()->json(['errors' => $v->errors()], 422)];
 
+        $a = $this->access();
+        if (!$a['full'] && !$a['employee']) return ['error' => $this->noTeacherProfile()];
+
         $classe = Classe::with('level')->find($request->classe_id);
         $period = Period::find($request->period_id);
         if (!$classe) return ['error' => $this->fail('Classe introuvable.', 404)];
         if (!$period) return ['error' => $this->fail('Période introuvable.', 404)];
 
         $subject = $this->leafSubjects($classe)->firstWhere('id', (int) $request->subject_id);
-        if (!$subject) return ['error' => $this->fail("Cette matière n'est pas attribuée à cette classe.")];
+        if (!$subject) return ['error' => $this->fail("Cette matière n'est pas attribuée à cette classe.", $this->access()['full'] ? 422 : 403)];
 
         return compact('classe', 'period', 'subject');
     }
@@ -91,12 +153,18 @@ class GradeBookController extends Controller
     /** GET /gradebook/context */
     public function context()
     {
-        $periods = Period::orderBy('id')->get(['id', 'name', 'code', 'is_active']);
+        $a = $this->access();
+        if (!$a['full'] && !$a['employee']) return $this->noTeacherProfile();
+
+        $periods = Period::orderBy('id')->get(['id', 'name', 'code', 'is_active', 'teachers_locked', 'is_closed']);
 
         return response()->json([
             'periods'          => $periods,
             'active_period_id' => $periods->firstWhere('is_active', true)?->id,
-            'classes'          => Classe::with('level')->orderBy('name')->get()->map(fn ($c) => [
+            'full_access'      => $a['full'],
+            'classes'          => Classe::with('level')
+                ->when(!$a['full'], fn ($q) => $q->whereIn('id', ClassroomSubjectTeacher::where('employee_id', $a['employee']->id)->pluck('classe_id')))
+                ->orderBy('name')->get()->map(fn ($c) => [
                 'id' => $c->id, 'name' => $c->name, 'level_name' => $c->level->name ?? null,
             ])->values(),
         ], 200);
@@ -105,6 +173,9 @@ class GradeBookController extends Controller
     /** GET /gradebook/subjects?classe_id= */
     public function subjects(Request $request)
     {
+        $a = $this->access();
+        if (!$a['full'] && !$a['employee']) return $this->noTeacherProfile();
+
         $classe = Classe::find($request->classe_id);
         if (!$classe) return $this->fail('Classe introuvable.', 404);
 
@@ -161,6 +232,7 @@ class GradeBookController extends Controller
         $r = $this->resolve($request);
         if (isset($r['error'])) return $r['error'];
         ['classe' => $classe, 'period' => $period, 'subject' => $subject] = $r;
+        if ($g = $this->periodGuard($period)) return $g;
 
         $v = Validator::make($request->all(), [
             'kind'                => 'required|in:' . implode(',', array_keys(self::KINDS)),
@@ -213,7 +285,12 @@ class GradeBookController extends Controller
     {
         $eval = Evaluation::find($evaluationId);
         if (!$eval || !Classe::where('id', $eval->classe_id)->exists()) return ['error' => $this->fail('Note introuvable.', 404)];
-        if (!Period::where('id', $eval->period_id)->exists())           return ['error' => $this->fail('Période introuvable.', 404)];
+        $evalPeriod = Period::find($eval->period_id);
+        if (!$evalPeriod)                                              return ['error' => $this->fail('Période introuvable.', 404)];
+        if ($g = $this->periodGuard($evalPeriod))                      return ['error' => $g];
+        $a = $this->access();
+        if (!$a['full'] && !$a['employee'])                            return ['error' => $this->noTeacherProfile()];
+        if (!$this->canAccess($eval->classe_id, $eval->subject_id))     return ['error' => $this->fail("Cette matière ne fait pas partie de vos attributions.", 403)];
         if (!Student::where('id', $studentId)->where('class_id', $eval->classe_id)->exists()) {
             return ['error' => $this->fail("Cet élève n'appartient pas à la classe.")];
         }
@@ -271,6 +348,7 @@ class GradeBookController extends Controller
         $r = $this->resolve($request);
         if (isset($r['error'])) return $r['error'];
         ['classe' => $classe, 'period' => $period, 'subject' => $subject] = $r;
+        if ($g = $this->periodGuard($period)) return $g;
 
         $v = Validator::make($request->all(), [
             'kind'          => 'required|in:average,points',

@@ -55,7 +55,7 @@ class PermissionsSeeder extends Seeder
 
             // ═══ Notes & Bulletins ═══
             'evaluations'      => ['view', 'create', 'edit', 'delete'],
-            'grades'           => ['view', 'enter', 'edit', 'publish'], //notes
+            'grades'           => ['view', 'enter', 'edit', 'publish', 'view_all', 'close'], //notes (view_all = toutes les classes, sinon uniquement ses attributions)
             'averages'         => ['view', 'calculate', 'validate'], // moyennes
             'report_cards'     => ['view', 'generate', 'print'], // bulletins scolaires
 

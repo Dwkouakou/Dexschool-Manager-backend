@@ -16,6 +16,27 @@ use Illuminate\Support\Facades\Storage;
 
 class StudentController extends Controller
 {
+    /**
+     * Enseignant « pur » : relié à un dossier employé avec des attributions de classes, sans droit de gestion
+     * des élèves (create/edit/delete) et qui n'est pas administrateur.
+     * Retourne la liste des class_id qui lui sont attribuées, ou null si aucune restriction ne s'applique.
+     */
+    private function teacherClassScope(): ?array
+    {
+        $user = Auth::user();
+        if (!$user) return null;
+        if ($user->roles()->where('slug', 'admin')->exists()) return null;
+        if ($user->canAny(['students.create', 'students.edit', 'students.delete'])) return null;
+
+        $employee = \App\Models\Personel\Employee::where('user_id', $user->id)->first();
+        if (!$employee) return null;
+
+        $ids = \App\Models\Academic\ClassroomSubjectTeacher::where('employee_id', $employee->id)
+            ->pluck('classe_id')->unique()->values()->all();
+
+        return $ids ?: null;
+    }
+
     public function index(): JsonResponse
     {
         try {
@@ -31,6 +52,11 @@ class StudentController extends Controller
                 ])
                 ->orderBy('created_at', 'desc')
                 ->get();
+
+            // Enseignant : uniquement les élèves de ses classes
+            if (($scope = $this->teacherClassScope()) !== null) {
+                $students = $students->whereIn('class_id', $scope)->values();
+            }
 
             if ($isActiveYearView) {
                 $students = $students->reject(function ($student) {
@@ -301,6 +327,10 @@ class StudentController extends Controller
 
             $student = Student::with(['parents'])->findOrFail($id);
 
+            if (($scope = $this->teacherClassScope()) !== null && !in_array($student->class_id, $scope)) {
+                return response()->json(['message' => "Cet élève ne fait pas partie de vos classes."], 403);
+            }
+
             $currentRecord = \App\Models\Academic\StudentAcademicRecord::withoutGlobalScope('viewingYear')
                 ->where('student_id', $student->id)
                 ->where('academic_year_id', $viewingYearId)
@@ -404,8 +434,11 @@ class StudentController extends Controller
             $studentData = $student->toArray();
             $studentData['classe']            = $classe;
             $studentData['last_enrollment']   = $lastEnrollmentInfo;
-            $studentData['financial_summary'] = $financialSummary;
-            $studentData['payments']          = $paymentsHistory;
+            // Situation financière visible uniquement pour les comptes ayant un droit financier / d'inscription
+            // (un enseignant qui peut seulement « voir les élèves » ne la reçoit pas)
+            $canSeeFinance = Auth::user()?->canAny(['payments.view', 'enrollments.view', 'financial_reports.view']);
+            $studentData['financial_summary'] = $canSeeFinance ? $financialSummary : null;
+            $studentData['payments']          = $canSeeFinance ? $paymentsHistory : [];
 
             $viewingYear = \App\Models\Academic\AcademicYears::find($viewingYearId);
             $studentData['viewing_academic_year'] = $viewingYear ? [
@@ -991,6 +1024,10 @@ class StudentController extends Controller
                 ->orWhere('last_name', 'LIKE', "%{$query}%")
                 ->orWhere('matricule', 'LIKE', "%{$query}%");
             });
+
+        if (($scope = $this->teacherClassScope()) !== null) {
+            $studentsQuery->whereIn('class_id', $scope);
+        }
 
         if ($enrolledOnly) {
             $studentsQuery->whereNotNull('class_id')
