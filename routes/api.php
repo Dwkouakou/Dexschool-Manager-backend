@@ -5,7 +5,10 @@ use App\Http\Controllers\AdminApiController;
 use App\Http\Controllers\Api\Academic\EvaluationController;
 use App\Http\Controllers\Api\Academic\GradeBookController;
 use App\Http\Controllers\PeriodClosureController;
-use App\Http\Controllers\Api\Academic\ReportCardController;
+use App\Http\Controllers\Api\Academic\AverageMatrixController;
+// use App\Http\Controllers\Api\Academic\ReportCardController;
+use App\Http\Controllers\Api\Academic\BulletinController;
+use App\Http\Controllers\Api\Academic\DspsExportController;
 use App\Http\Controllers\Api\Academic\ResultController;
 use App\Http\Controllers\Api\ClasseController;
 use App\Http\Controllers\Api\CycleController;
@@ -856,6 +859,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/grades/period-closures/{id}/teachers-lock', [PeriodClosureController::class, 'toggleTeachersLock'])->middleware('permission:grades.close')->middleware('module:grades');
     Route::post('/grades/period-closures/{id}/close', [PeriodClosureController::class, 'toggleClose'])->middleware('permission:grades.close')->middleware('module:grades');
 
+    // ── Moyenne période (matrice, admin) (api.php) ──
+
+    Route::get('/gradebook/matrix',         [AverageMatrixController::class, 'matrix'])->middleware('permission:grades.view')->middleware('module:grades');
 
 
     // _______________________________________________________________
@@ -874,9 +880,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
       // Routes du Module 6 : Bulletins
-    Route::get('/report-cards', [ReportCardController::class, 'index'])
-        ->middleware('permission:report_cards.view')->middleware('module:report_cards');
-    Route::get('/report-cards/student/{studentId}', [ReportCardController::class, 'getReportCardData'])
-        ->middleware('permission:report_cards.view')->middleware('module:report_cards');
+
+Route::get('/report-cards/context',         [BulletinController::class, 'context'])->middleware('permission:report_cards.view')->middleware('module:report_cards');
+Route::get('/report-cards/class',           [BulletinController::class, 'classSummary'])->middleware('permission:report_cards.view')->middleware('module:report_cards');
+Route::get('/report-cards/class/bulletins', [BulletinController::class, 'classBulletins'])->middleware('permission:report_cards.print')->middleware('module:report_cards');
+Route::get('/report-cards/student/{studentId}', [BulletinController::class, 'student'])->middleware('permission:report_cards.print')->middleware('module:report_cards');
+// dsps 
+Route::get('/report-cards/dsps/class', [DspsExportController::class, 'byClass'])->middleware('permission:report_cards.generate')->middleware('module:report_cards');
+Route::get('/report-cards/dsps/level', [DspsExportController::class, 'byLevel'])->middleware('permission:report_cards.generate')->middleware('module:report_cards');
 
 });

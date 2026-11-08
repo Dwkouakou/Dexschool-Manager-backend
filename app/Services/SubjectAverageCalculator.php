@@ -72,14 +72,14 @@ class SubjectAverageCalculator
 
         $sum = []; $den = [];
         foreach ($children as $cid) {
-            $c = (float) ($coefs[$cid] ?? 1) ?: 1;
+            $c = (float) ($coefs[$cid] ?? 1);
             foreach (self::compute($classeId, $cid, $periodId) as $sid => $r) {
                 $sum[$sid] = ($sum[$sid] ?? 0) + $r['average'] * $c;
                 $den[$sid] = ($den[$sid] ?? 0) + $c;
             }
         }
         $res = [];
-        foreach ($sum as $sid => $v) $res[$sid] = round($v / $den[$sid], 2);
+        foreach ($sum as $sid => $v) if ($den[$sid] > 0) $res[$sid] = round($v / $den[$sid], 2);
         return $res;
     }
 
