@@ -114,6 +114,14 @@ class BulletinController extends Controller
                     'average' => $cAvg, 'coef' => $c['coef'], 'total' => $cAvg !== null ? round($cAvg * $c['coef'], 2) : null,
                     'rank' => $cRk['rank'] ?? null, 'tie' => $cRk['tie'] ?? false];
             }
+            // Ligne de bilan après la dernière matière du groupe
+            $bk = $m['bilan'];
+            if ($bk && isset($res['bilans'][$bk]) && $res['bilans'][$bk]['last'] === $m['id']) {
+                $bl = $res['bilans'][$bk]; $bs = $bl['sums'][$s->id] ?? null; $br = $bl['rank'][$s->id] ?? null;
+                $disc[] = ['id' => 'bilan-' . $bk, 'type' => 'bilan', 'child' => false, 'name' => $bl['label'],
+                    'average' => $bl['avg'][$s->id] ?? null, 'coef' => $bs['coef'] ?? null, 'total' => $bs['total'] ?? null,
+                    'rank' => $br['rank'] ?? null, 'tie' => $br['tie'] ?? false];
+            }
         }
         $g = $res['general'][$s->id] ?? null;
         return [

@@ -46,6 +46,7 @@ class SubjectLevelSettingController extends Controller
                 'parent_id'            => $s->parent_id,
                 'name'                 => $s->name,
                 'code'                 => $s->code,
+                'bilan'                => $s->bilan,
                 'coefficient'          => $st?->coefficient,
                 'excluded_from_report' => (bool) ($st?->excluded_from_report ?? false),
             ];
@@ -117,6 +118,32 @@ class SubjectLevelSettingController extends Controller
         });
 
         return response()->json(['status' => 'success', 'message' => 'Disciplines du bulletin enregistrées.'], 200);
+    }
+
+    /**
+     * PUT /academic/subject-settings/bilan
+     * { subject_ids: [int], bilan: 'lettres'|'sciences'|'autres'|null }
+     * Affecte les matières cochées à un bilan (null = retirer du bilan).
+     * Une matière principale entraîne ses sous-matières.
+     */
+    public function saveBilan(Request $request)
+    {
+        $data = $request->validate([
+            'subject_ids'   => ['required', 'array', 'min:1'],
+            'subject_ids.*' => ['integer'],
+            'bilan'         => ['nullable', 'in:lettres,sciences,autres'],
+        ]);
+
+        $ids   = array_values(array_unique($data['subject_ids']));
+        $valid = Subject::whereIn('id', $ids)->pluck('id')->all();
+        abort_if(count($ids) !== count($valid), 422, "Matière invalide.");
+
+        DB::transaction(function () use ($ids, $data) {
+            Subject::where(fn ($q) => $q->whereIn('id', $ids)->orWhereIn('parent_id', $ids))
+                ->update(['bilan' => $data['bilan'] ?? null]);
+        });
+
+        return response()->json(['status' => 'success', 'message' => 'Bilan enregistré.'], 200);
     }
 
     /**

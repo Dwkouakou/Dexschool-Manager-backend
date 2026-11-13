@@ -748,6 +748,8 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:subjects.create')->middleware('module:subjects');
 
         // nouvelle route module matieres
+        Route::put('/academic/subject-settings/bilan', [SubjectLevelSettingController::class, 'saveBilan'])
+        ->middleware('permission:subjects.view')->middleware('module:subjects');
     Route::get('/academic/subject-settings/levels', [SubjectLevelSettingController::class, 'levels'])
         ->middleware('permission:subjects.view')->middleware('module:subjects');
     Route::get('/academic/subject-settings', [SubjectLevelSettingController::class, 'show'])

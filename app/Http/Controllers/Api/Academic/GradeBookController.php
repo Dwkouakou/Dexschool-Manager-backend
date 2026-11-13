@@ -147,7 +147,7 @@ class GradeBookController extends Controller
 
     private function studentsOf(Classe $classe)
     {
-        return Student::where('class_id', $classe->id)->orderBy('last_name')->orderBy('first_name')->get();
+        return Student::where('class_id', $classe->id)->whereHas('enrollments', fn ($q) => $q->where('status', '!=', 'cancelled'))->orderBy('last_name')->orderBy('first_name')->get();
     }
 
     /** GET /gradebook/context */
@@ -291,7 +291,7 @@ class GradeBookController extends Controller
         $a = $this->access();
         if (!$a['full'] && !$a['employee'])                            return ['error' => $this->noTeacherProfile()];
         if (!$this->canAccess($eval->classe_id, $eval->subject_id))     return ['error' => $this->fail("Cette matière ne fait pas partie de vos attributions.", 403)];
-        if (!Student::where('id', $studentId)->where('class_id', $eval->classe_id)->exists()) {
+        if (!Student::where('id', $studentId)->where('class_id', $eval->classe_id)->whereHas('enrollments', fn ($q) => $q->where('status', '!=', 'cancelled'))->exists()) {
             return ['error' => $this->fail("Cet élève n'appartient pas à la classe.")];
         }
         return ['eval' => $eval];

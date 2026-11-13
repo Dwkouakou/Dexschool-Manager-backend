@@ -86,7 +86,7 @@ class AverageMatrixController extends Controller
 
         $warnings = [];
         $mains    = $this->mainSubjects($classe, $warnings);
-        $students = Student::where('class_id', $classe->id)->orderBy('last_name')->orderBy('first_name')->get();
+        $students = Student::where('class_id', $classe->id)->whereHas('enrollments', fn ($q) => $q->where('status', '!=', 'cancelled'))->orderBy('last_name')->orderBy('first_name')->get();
         $ids      = $students->pluck('id')->all();
 
         // Moyennes de chaque matière principale (sous-matières incluses)

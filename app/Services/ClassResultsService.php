@@ -19,6 +19,9 @@ use App\Models\Personel\Employee;
  */
 class ClassResultsService
 {
+    /** Bilans disponibles (clé stockée dans subjects.bilan => libellé), dans l'ordre d'affichage. */
+    public const BILANS = ['lettres' => 'Bilan Lettres', 'sciences' => 'Bilan Sciences', 'autres' => 'Bilan Autres'];
+
     /** Appréciation selon la moyenne. $scale = barème de la valeur (20 par défaut, 10 pour une note sur 10). */
     public static function appreciation(?float $avg, int $scale = 20): string
     {
@@ -78,6 +81,7 @@ class ClassResultsService
             }
             return [
                 'id' => (int) $s->id, 'code' => $s->code, 'name' => $s->name, 'coef' => (float) $coef,
+                'bilan' => in_array($s->bilan, array_keys(self::BILANS), true) ? $s->bilan : null,
                 'teacher' => self::teacherLabel($employees[$a->employee_id] ?? null),
                 'children' => ($children[$s->id] ?? collect())->map(fn ($c) => [
                     'id' => (int) $c->id, 'code' => $c->code, 'name' => $c->name, 'coef' => (float) ($levelCoefs[$c->id] ?? 1),
@@ -85,7 +89,15 @@ class ClassResultsService
             ];
         })->sortBy('name')->values()->all();
 
-        $students = Student::where('class_id', $classe->id)->orderBy('last_name')->orderBy('first_name')->get();
+        // Regroupement par bilan (lettres, sciences, autres) ; les matières sans bilan viennent à la fin
+        $order = array_keys(self::BILANS);
+        usort($mains, function ($a, $b) use ($order) {
+            $ia = $a['bilan'] === null ? 99 : array_search($a['bilan'], $order);
+            $ib = $b['bilan'] === null ? 99 : array_search($b['bilan'], $order);
+            return $ia <=> $ib ?: strcmp($a['name'], $b['name']);
+        });
+
+        $students = Student::where('class_id', $classe->id)->whereHas('enrollments', fn ($q) => $q->where('status', '!=', 'cancelled'))->orderBy('last_name')->orderBy('first_name')->get();
         $ids = $students->pluck('id')->all();
 
         $mainAvg = []; $childAvg = []; $subjRank = [];
@@ -96,6 +108,22 @@ class ClassResultsService
                 $childAvg[$c['id']] = array_map(fn ($r) => $r['average'], SubjectAverageCalculator::compute((int) $classe->id, $c['id'], (int) $period->id));
                 $subjRank[$c['id']] = self::rank($childAvg[$c['id']]);
             }
+        }
+
+        // Bilans : moyenne = Σ(moy × coef) / Σ coef des matières du bilan ; rang dans la classe
+        $bilans = [];
+        foreach (self::BILANS as $key => $label) {
+            $group = array_values(array_filter($mains, fn ($m) => $m['bilan'] === $key));
+            if (!$group) continue;
+            $avgs = []; $sums = [];
+            foreach ($ids as $sid) {
+                $pts = 0; $den = 0;
+                foreach ($group as $m) {
+                    if (isset($mainAvg[$m['id']][$sid])) { $pts += $mainAvg[$m['id']][$sid] * $m['coef']; $den += $m['coef']; }
+                }
+                if ($den > 0) { $avgs[$sid] = round($pts / $den, 2); $sums[$sid] = ['coef' => $den, 'total' => round($pts, 2)]; }
+            }
+            $bilans[$key] = ['label' => $label, 'avg' => $avgs, 'sums' => $sums, 'rank' => self::rank($avgs), 'last' => end($group)['id']];
         }
 
         $general = [];
@@ -116,7 +144,7 @@ class ClassResultsService
         return [
             'mains' => $mains, 'students' => $students,
             'mainAvg' => $mainAvg, 'childAvg' => $childAvg, 'subjRank' => $subjRank,
-            'general' => $general, 'rank' => $rank, 'stats' => $stats,
+            'bilans' => $bilans, 'general' => $general, 'rank' => $rank, 'stats' => $stats,
             'repeaters' => StudentAcademicRecord::whereIn('student_id', $ids)->pluck('is_repeater', 'student_id'),
             'warnings' => array_values(array_unique($warnings)),
         ];

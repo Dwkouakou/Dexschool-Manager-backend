@@ -31,6 +31,7 @@ class TeacherStudentController extends Controller
 
         $students = Student::whereIn('class_id', $classes->pluck('id'))
             ->where('is_active', true)
+            ->whereHas('enrollments', fn ($q) => $q->where('status', '!=', 'cancelled'))
             ->orderBy('last_name')->orderBy('first_name')
             ->get(['id', 'class_id', 'matricule', 'national_matricule', 'last_name', 'first_name', 'gender', 'birth_date', 'photo']);
 
